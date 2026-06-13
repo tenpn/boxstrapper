@@ -61,7 +61,10 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     Write-Warning "VS Code ('code') is not on PATH yet; skipping extensions. Open a new shell and re-run Update-Box.ps1."
 }
 
-# --- 3. other idempotent setup steps go here -------------------------------
+# --- 3. Gitea service (registered + supervised by nssm) --------------------
+& (Join-Path $PSScriptRoot 'Gitea-Setup.ps1')
+
+# --- 4. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
