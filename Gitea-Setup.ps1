@@ -20,7 +20,11 @@ param(
     [string]$ServiceName = 'gitea',
     # Keep this path space-free: the service's command line is stored unquoted,
     # so a space in the config path would split Gitea's --config argument.
-    [string]$WorkDir     = 'C:\gitea'
+    [string]$WorkDir     = 'C:\gitea',
+    # Public hostname Gitea is reached at through the Cloudflare Tunnel, e.g.
+    # 'git.example.com'. Sets ROOT_URL/DOMAIN so Gitea emits correct links.
+    # Leave empty for local sandbox testing (Gitea derives the URL from the request).
+    [string]$PublicHostname = ''
 )
 
 Set-StrictMode -Version Latest
@@ -86,14 +90,30 @@ foreach ($d in @($WorkDir, $confDir, $logDir, (Join-Path $WorkDir 'data'))) {
 if (-not (Test-Path $configPath)) {
     $runUser = "$env:COMPUTERNAME`$"
     $dbPath  = ($WorkDir -replace '\\', '/') + '/data/gitea.db'
+    # When fronted by Cloudflare Tunnel, ROOT_URL/DOMAIN make Gitea emit correct links.
+    $hostLines = ''
+    if ($PublicHostname) {
+        $hostLines = "ROOT_URL = https://$PublicHostname/`r`nDOMAIN   = $PublicHostname`r`n"
+    }
     @"
 RUN_USER = $runUser
 
+[server]
+; Bind to loopback only -- the box is reached via the Cloudflare Tunnel connector
+; running locally, so Gitea must never be exposed on the LAN/WAN directly.
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = 3000
+$hostLines
 [database]
 DB_TYPE = sqlite3
 PATH    = $dbPath
+
+[service]
+; Collaborator instance: no open sign-ups, and nothing is visible without a login.
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW  = true
 "@ | Set-Content -Path $configPath -Encoding ASCII
-    Write-Host "[boxstrapper] Wrote seed config $configPath (RUN_USER=$runUser)" -ForegroundColor DarkGray
+    Write-Host "[boxstrapper] Wrote seed config $configPath (RUN_USER=$runUser, bind=127.0.0.1)" -ForegroundColor DarkGray
 } else {
     Write-Host "[boxstrapper] Config already present at $configPath; left untouched." -ForegroundColor DarkGray
 }

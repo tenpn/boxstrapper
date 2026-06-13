@@ -64,7 +64,10 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 3. Gitea service (registered + supervised by nssm) --------------------
 & (Join-Path $PSScriptRoot 'Gitea-Setup.ps1')
 
-# --- 4. other idempotent setup steps go here -------------------------------
+# --- 4. Cloudflare Tunnel connector (remote access; skips if no token) ------
+& (Join-Path $PSScriptRoot 'Cloudflare-Tunnel-Setup.ps1')
+
+# --- 5. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
