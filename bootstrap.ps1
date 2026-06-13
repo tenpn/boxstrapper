@@ -55,11 +55,14 @@ if (Test-Command 'choco') {
     Write-Host '[boxstrapper] Chocolatey already installed.' -ForegroundColor Green
 } else {
     Write-Host '[boxstrapper] Installing Chocolatey...' -ForegroundColor Cyan
-    # Isolate the official installer from our StrictMode so it can't trip on it.
-    & {
-        Set-StrictMode -Off
-        Invoke-RestMethod 'https://community.chocolatey.org/install.ps1' | Invoke-Expression
-    }
+    # Run the official installer in a fresh powershell.exe so it gets a clean
+    # session: no inherited StrictMode/ErrorAction, and no nested-pipeline module
+    # autoload bug -- 'irm|iex' inside an 'irm|iex' breaks Expand-Archive's
+    # auto-loading of Microsoft.PowerShell.Archive.
+    $chocoInstaller = Join-Path $env:TEMP 'boxstrapper-choco-install.ps1'
+    (New-Object System.Net.WebClient).DownloadFile('https://community.chocolatey.org/install.ps1', $chocoInstaller)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $chocoInstaller
+    if ($LASTEXITCODE -ne 0) { throw "Chocolatey install failed (exit code $LASTEXITCODE)." }
     Update-Path
 }
 
