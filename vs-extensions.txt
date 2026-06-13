@@ -1,0 +1,3 @@
+# VS Code extensions installed idempotently by Update-Box.ps1 (one id per line).
+# Find ids on the Marketplace page URL or via: code --list-extensions
+ms-vscode.powershell
