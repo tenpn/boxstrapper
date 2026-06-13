@@ -129,9 +129,27 @@ $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) { throw "Service '$ServiceName' not found after install." }
 if ($svc.Status -ne 'Running') {
     Write-Host "[boxstrapper] Starting '$ServiceName'..." -ForegroundColor Cyan
-    & $nssm start $ServiceName | Out-Null
+    # Start-Service waits for the SCM to report Running and throws on a start
+    # failure -- cleaner and more honest than 'nssm start', whose CLI prints a
+    # scary-looking "Unexpected status SERVICE_START_PENDING" while it's merely
+    # still initializing.
+    Start-Service -Name $ServiceName
 } else {
     Write-Host "[boxstrapper] '$ServiceName' already running." -ForegroundColor Green
 }
 
-Write-Host "[boxstrapper] Gitea service ready. Finish setup at http://localhost:3000" -ForegroundColor Green
+# A 'Running' service only means nssm's wrapper is up -- nssm will keep restarting
+# a crashing gitea.exe while still reporting Running. Probe the web port for the
+# real health signal.
+$ready = $false
+foreach ($attempt in 1..10) {
+    try {
+        Invoke-WebRequest 'http://localhost:3000' -UseBasicParsing -TimeoutSec 3 | Out-Null
+        $ready = $true; break
+    } catch { Start-Sleep -Seconds 2 }
+}
+if ($ready) {
+    Write-Host "[boxstrapper] Gitea is responding -- finish setup at http://localhost:3000" -ForegroundColor Green
+} else {
+    Write-Warning "Gitea service registered but http://localhost:3000 isn't answering yet. Check $logDir\service-stderr.log."
+}
