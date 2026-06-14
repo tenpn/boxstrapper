@@ -70,7 +70,10 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 5. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
 & (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1')
 
-# --- 6. other idempotent setup steps go here -------------------------------
+# --- 6. Autologon for the admin desktop session (skips if no password) ------
+& (Join-Path $PSScriptRoot 'Autologon-Setup.ps1')
+
+# --- 7. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
