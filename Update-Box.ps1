@@ -67,7 +67,10 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 4. Cloudflare Tunnel connector (remote access; skips if no token) ------
 & (Join-Path $PSScriptRoot 'Cloudflare-Tunnel-Setup.ps1')
 
-# --- 5. other idempotent setup steps go here -------------------------------
+# --- 5. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
+& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1')
+
+# --- 6. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green

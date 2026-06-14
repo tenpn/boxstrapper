@@ -4,7 +4,7 @@ Take a fresh Windows machine to a configured dev box with one command.
 
 ## Quick start
 
-Open an **elevated** PowerShell (Start menu → PowerShell → *Run as administrator*) and run:
+Open an **elevated** PowerShell (Start menu → PowerShell → _Run as administrator_) and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/tenpn/boxstrapper/wildblue/bootstrap.ps1 | iex
@@ -18,8 +18,7 @@ That's it. The bootstrap is safe to re-run.
 ## What it does
 
 1. **`bootstrap.ps1`** (the line above) — enables TLS 1.2, checks for admin, installs
-   **Chocolatey** and **git** if they're missing, clones this repo's `wildblue` branch to
-   `%USERPROFILE%\boxstrapper`, then runs `Update-Box.ps1`.
+   **Chocolatey** and **git** if they're missing, clones this repo, then runs `Update-Box.ps1`.
 2. **`packages.config`** — the Chocolatey manifest: the list of packages to install.
 3. **`Update-Box.ps1`** — the idempotent setup script. Applies the manifest
    (`choco install packages.config -y`, skipping anything already present) and installs the
