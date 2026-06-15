@@ -46,39 +46,6 @@ function Update-Path {
     }
 }
 
-function Disable-QuickEdit {
-    # Legacy Windows consoles default to QuickEdit Mode, where a stray click puts
-    # the window into "select" mode and SUSPENDS the running process until you
-    # deselect -- which silently freezes a long unattended run. Turn it off so a
-    # misclick can't stall provisioning. No-op where there's no real console.
-    try {
-        if (-not ('BoxConsole' -as [type])) {
-            Add-Type -ErrorAction Stop -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class BoxConsole {
-    const uint ENABLE_QUICK_EDIT = 0x0040, ENABLE_EXTENDED_FLAGS = 0x0080;
-    const int  STD_INPUT_HANDLE = -10;
-    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int n);
-    [DllImport("kernel32.dll")] static extern bool GetConsoleMode(IntPtr h, out uint m);
-    [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint m);
-    public static void DisableQuickEdit() {
-        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
-        uint mode;
-        if (!GetConsoleMode(h, out mode)) return;
-        SetConsoleMode(h, (mode & ~ENABLE_QUICK_EDIT) | ENABLE_EXTENDED_FLAGS);
-    }
-}
-'@
-        }
-        [BoxConsole]::DisableQuickEdit()
-    } catch {
-        # Non-interactive / redirected: nothing to disable.
-    }
-}
-
-Disable-QuickEdit
-
 if (-not (Test-Admin)) {
     throw 'boxstrapper must run in an elevated PowerShell. Start PowerShell with "Run as administrator", then re-run the one-liner.'
 }
