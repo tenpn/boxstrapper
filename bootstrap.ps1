@@ -6,9 +6,11 @@
 
         irm https://raw.githubusercontent.com/tenpn/boxstrapper/wildblue/bootstrap.ps1 | iex
 
-    Installs Chocolatey + git (skipping whatever is already present), clones the
-    boxstrapper repo, then hands off to Update-Box.ps1 which applies the choco
-    manifest and the rest. Safe to re-run.
+    Preflights Smart App Control (clean-install Windows 11 enables SAC, which blocks
+    Git for Windows -- if SAC is enforced, bootstrap stops with instructions to turn
+    it off and reboot), then installs Chocolatey + git (skipping whatever is already
+    present), clones the boxstrapper repo, and hands off to Update-Box.ps1 which
+    applies the choco manifest and the rest. Safe to re-run.
 #>
 
 Set-StrictMode -Version Latest
@@ -34,6 +36,17 @@ function Test-Command {
     [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Get-SmartAppControlState {
+    # Smart App Control (SAC) state, read from the Code Integrity policy flag:
+    #   0 = Off, 1 = Enforced, 2 = Evaluation; $null when the value is absent
+    # (older/upgraded Windows that never had SAC). Enforced SAC blocks Git for
+    # Windows' unsigned MSYS2 DLLs, which the preflight gate below stops on.
+    $item = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
+        -Name 'VerifiedAndReputablePolicyState' -ErrorAction SilentlyContinue
+    if ($item) { return $item.VerifiedAndReputablePolicyState }
+    return $null
+}
+
 function Update-Path {
     # Pull newly-installed tools onto PATH for the current session.
     if (-not $env:ChocolateyInstall) {
@@ -48,6 +61,32 @@ function Update-Path {
 
 if (-not (Test-Admin)) {
     throw 'boxstrapper must run in an elevated PowerShell. Start PowerShell with "Run as administrator", then re-run the one-liner.'
+}
+
+# --- Smart App Control preflight -------------------------------------------
+# SAC (default-on for clean-install Windows 11 22H2+) blocks Git for Windows'
+# unsigned MSYS2 DLLs (msys-2.0.dll, libpcre2-8-0.dll, ...) at the Code Integrity
+# layer, so git fails to load with a cryptic "bad image 0xc0e90002" and the whole
+# bootstrap is doomed. There is no per-app allowlist -- the only fix is to turn SAC
+# off and reboot. Catch it here, before we install anything, and stop with guidance
+# (like the secrets gate in Update-Box.ps1) instead of failing obscurely mid-clone.
+# Evaluation mode (2) still lets git run, so we only HALT on Enforced (1); we warn
+# on Evaluation because Windows can promote it to Enforced on its own.
+$sac = Get-SmartAppControlState
+if ($sac -eq 1) {
+    Write-Host    '[boxstrapper] Smart App Control is ENFORCED on this box -- cannot continue.' -ForegroundColor Cyan
+    Write-Host    '  SAC blocks the unsigned MSYS2 DLLs in Git for Windows at the Code Integrity' -ForegroundColor DarkGray
+    Write-Host    '  layer (you would hit a cryptic "bad image 0xc0e90002" error), so git cannot' -ForegroundColor DarkGray
+    Write-Host    '  run and the rest of the bootstrap would fail. SAC has no per-app allowlist;' -ForegroundColor DarkGray
+    Write-Host    '  the only fix is to turn it off and reboot:' -ForegroundColor DarkGray
+    Write-Host    '    Settings > Privacy & security > Windows Security >' -ForegroundColor DarkGray
+    Write-Host    '    App & browser control > Smart App Control > Off' -ForegroundColor DarkGray
+    Write-Host    '  Once off, Windows will not let SAC turn back on without resetting Windows.' -ForegroundColor DarkGray
+    Write-Warning 'Smart App Control is enforced: disable it (see above), reboot, then re-run this bootstrap.'
+    return
+}
+if ($sac -eq 2) {
+    Write-Warning 'Smart App Control is in EVALUATION mode: git works for now, but Windows can promote it to Enforced at any time and break a later run. Consider turning SAC off via Windows Security > App & browser control > Smart App Control.'
 }
 
 # --- Chocolatey ------------------------------------------------------------
