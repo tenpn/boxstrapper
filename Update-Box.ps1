@@ -34,9 +34,38 @@ function Update-Path {
     }
 }
 
+function Read-Secrets {
+    # Parse the INI secrets file into a hashtable. Value = everything after the first '='
+    # (so base64 tokens ending in '==' survive); '#' comments and blank lines are ignored.
+    param([Parameter(Mandatory)][string]$Path)
+    $secrets = @{}
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        $i = $t.IndexOf('=')
+        if ($i -lt 1) { continue }
+        $secrets[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
+    }
+    return $secrets
+}
+
 if (-not (Test-Admin)) {
     throw 'Update-Box.ps1 must run in an elevated PowerShell (Chocolatey needs admin).'
 }
+
+# --- 0. secrets ------------------------------------------------------------
+# The single source of secrets for the box. On a fresh box this file doesn't exist yet, so we
+# seed it from the committed template and stop, letting the user fill it in before we provision.
+$secretsFile = Join-Path $PSScriptRoot 'secrets.ini'
+$exampleFile = Join-Path $PSScriptRoot 'secrets.example'
+if (-not (Test-Path $secretsFile)) {
+    if (-not (Test-Path $exampleFile)) { throw "Neither secrets.ini nor secrets.example found in $PSScriptRoot." }
+    Copy-Item -LiteralPath $exampleFile -Destination $secretsFile
+    Write-Host    "[boxstrapper] Created $secretsFile from the template." -ForegroundColor Cyan
+    Write-Warning "Fill in your secrets (leave a key blank to skip that feature), then re-run Update-Box.ps1."
+    return
+}
+$secrets = Read-Secrets -Path $secretsFile
 
 # --- 1. apply the choco manifest -------------------------------------------
 $manifest = Join-Path $PSScriptRoot 'packages.config'
@@ -65,13 +94,13 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 & (Join-Path $PSScriptRoot 'Gitea-Setup.ps1')
 
 # --- 4. Cloudflare Tunnel connector (remote access; skips if no token) ------
-& (Join-Path $PSScriptRoot 'Cloudflare-Tunnel-Setup.ps1')
+& (Join-Path $PSScriptRoot 'Cloudflare-Tunnel-Setup.ps1') -Token $secrets['CF_TUNNEL_TOKEN']
 
 # --- 5. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
-& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1')
+& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_PING_URL']
 
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
-& (Join-Path $PSScriptRoot 'Autologon-Setup.ps1')
+& (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
 # --- 7. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)

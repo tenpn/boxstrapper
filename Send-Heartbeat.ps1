@@ -11,20 +11,17 @@
                              period                                   [box/power/scheduler dead]
     So a missed ping and a /fail ping mean different things: dead box vs crashed Gitea.
 
-    The ping URL is a secret-ish token (anyone with it can keep your check green), so it
-    is never committed. It is read from, in order:
-      1. $env:HC_PING_URL
-      2. a local file (default C:\ProgramData\boxstrapper\hc-ping-url.txt)
-    NOTE: the scheduled task runs as SYSTEM and will NOT see an env var from your
-    interactive shell -- in practice the file is the source. Healthchecks-Setup.ps1
-    persists the URL there for exactly this reason.
+    The ping URL is a secret-ish token (anyone with it can keep your check green), so it is
+    never committed. It arrives as -PingUrl: Healthchecks-Setup.ps1 bakes it into this task's
+    argument (from secrets.ini, key HC_PING_URL) because the SYSTEM task can't see a shell env
+    var. Re-run Update-Box.ps1 after editing secrets.ini to refresh it.
 
     A heartbeat must never take the box down, so every failure here is swallowed and logged.
 #>
 
 [CmdletBinding()]
 param(
-    [string]$UrlFile    = (Join-Path $env:ProgramData 'boxstrapper\hc-ping-url.txt'),
+    [string]$PingUrl    = '',
     [string]$HealthUrl  = 'http://localhost:3000/api/healthz',
     [int]   $TimeoutSec = 10
 )
@@ -32,16 +29,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# --- resolve the ping URL (a secret; never in the repo) ---------------------
-$pingUrl = $env:HC_PING_URL
-if (-not $pingUrl -and (Test-Path $UrlFile)) {
-    $pingUrl = (Get-Content $UrlFile -Raw).Trim()
-}
-if (-not $pingUrl) {
-    Write-Warning "No Healthchecks ping URL found (env:HC_PING_URL or $UrlFile); nothing to send."
+# --- a ping URL must be provided, else there's nothing to send --------------
+if (-not $PingUrl) {
+    Write-Warning "No Healthchecks ping URL provided (-PingUrl); nothing to send."
     return
 }
-$pingUrl = $pingUrl.TrimEnd('/')
+$pingUrl = $PingUrl.TrimEnd('/')
 
 # --- probe Gitea locally ----------------------------------------------------
 # A 200 from /api/healthz is the real "Gitea is serving" signal. Any non-200 or a

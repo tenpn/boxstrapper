@@ -23,11 +23,15 @@ That's it. The bootstrap is safe to re-run.
 3. **`Update-Box.ps1`** — the idempotent setup script. Applies the manifest
    (`choco install packages.config -y`, skipping anything already present) and installs the
    VS Code extensions in **`vs-extensions.txt`**. Re-run it any time to bring the box up to date.
+4. **`secrets.ini`** — your secrets (git-ignored). On first run `Update-Box.ps1` creates it from
+   **`secrets.example`** and **stops** so you can fill it in; leave a key blank to skip that
+   feature, then re-run.
 
 ## Day-to-day
 
 - **Add a tool:** add a `<package id="..." />` line to `packages.config`.
 - **Add a VS Code extension:** add its id to `vs-extensions.txt`.
+- **Change a secret:** edit `secrets.ini` (see `secrets.example` for the keys), then re-run `Update-Box.ps1`.
 - **Apply changes on an existing box:**
 
   ```powershell

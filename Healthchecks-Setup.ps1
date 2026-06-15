@@ -14,14 +14,12 @@
     the Cloudflare Tunnel path is actually reachable end to end.
 
     The ping URL is a secret-ish token; it is never committed. Create a check at
-    https://healthchecks.io (set its period to match -IntervalMin, plus a little grace),
-    copy its ping URL, and supply it via either:
-      1. $env:HC_PING_URL, or
-      2. C:\ProgramData\boxstrapper\hc-ping-url.txt
-    Whichever you use, this script persists it to the file so the SYSTEM task can read it at
-    run time (a shell env var is not visible to that task). If neither is present (e.g. a
-    throwaway sandbox), it explains how to enable it and skips -- non-fatal, so the rest of
-    the box still provisions.
+    https://healthchecks.io (set its period to match -IntervalMin, plus a little grace), copy
+    its ping URL into secrets.ini (key HC_PING_URL; see secrets.example), and Update-Box.ps1
+    passes it in as -PingUrl. The SYSTEM task can't see a shell env var, so this script bakes
+    the URL into the scheduled task's argument (Send-Heartbeat.ps1 -PingUrl <url>) -- that is the
+    run-time source. If -PingUrl is blank (e.g. a throwaway sandbox), it explains how to enable
+    it and skips -- non-fatal, so the rest of the box still provisions.
 
     Assumes Send-Heartbeat.ps1 sits next to this script (it does, in the repo).
 #>
@@ -29,7 +27,7 @@
 [CmdletBinding()]
 param(
     [string]$TaskName    = 'boxstrapper-heartbeat',
-    [string]$UrlFile     = (Join-Path $env:ProgramData 'boxstrapper\hc-ping-url.txt'),
+    [string]$PingUrl     = '',
     [int]   $IntervalMin = 5
 )
 
@@ -46,32 +44,23 @@ if (-not (Test-Admin)) {
     throw 'Healthchecks-Setup.ps1 must run in an elevated PowerShell (registering a SYSTEM scheduled task needs admin).'
 }
 
-# --- a ping URL must be configured, else there's nothing to schedule --------
-$pingUrl = $env:HC_PING_URL
-if (-not $pingUrl -and (Test-Path $UrlFile)) {
-    $pingUrl = (Get-Content $UrlFile -Raw).Trim()
-}
-if (-not $pingUrl) {
-    Write-Warning "No Healthchecks ping URL found; skipping heartbeat setup (the box still works)."
+# --- a ping URL must be provided, else there's nothing to schedule ----------
+if (-not $PingUrl) {
+    Write-Warning "No Healthchecks ping URL provided; skipping heartbeat setup (the box still works)."
     Write-Host    "  To enable: create a check at https://healthchecks.io (period $IntervalMin min + grace),"
-    Write-Host    "  copy its ping URL, then put it in `$env:HC_PING_URL or $UrlFile and re-run Update-Box.ps1."
+    Write-Host    "  copy its ping URL into secrets.ini (key HC_PING_URL; see secrets.example), then re-run Update-Box.ps1."
     return
 }
 
 $heartbeat = Join-Path $PSScriptRoot 'Send-Heartbeat.ps1'
 if (-not (Test-Path $heartbeat)) { throw "Send-Heartbeat.ps1 not found next to this script ($heartbeat)." }
 
-# --- persist the URL where the SYSTEM task can read it ----------------------
-# The scheduled task runs as SYSTEM and won't inherit a shell env var, so the file is
-# the runtime source. It lives under ProgramData (ACL'd to admins/SYSTEM), which also
-# keeps the secret out of the task definition itself.
-$urlDir = Split-Path $UrlFile -Parent
-if (-not (Test-Path $urlDir)) { New-Item -ItemType Directory -Path $urlDir -Force | Out-Null }
-Set-Content -Path $UrlFile -Value $pingUrl -Encoding ASCII -NoNewline
-
 # --- (re)register the scheduled task (idempotent via -Force) ----------------
+# The task runs as SYSTEM and won't inherit a shell env var, so the URL is baked into the task's
+# argument (Send-Heartbeat.ps1 reads it from -PingUrl). secrets.ini stays the single source; this
+# is a derived copy, refreshed whenever you re-run Update-Box.ps1.
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$heartbeat`""
+    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$heartbeat`" -PingUrl `"$PingUrl`""
 # Empty RepetitionDuration => repeat indefinitely (verified on Win10/11; no MaxValue hack).
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMin)
