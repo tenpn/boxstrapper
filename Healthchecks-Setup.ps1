@@ -28,7 +28,7 @@
 param(
     [string]$TaskName    = 'boxstrapper-heartbeat',
     [string]$PingUrl     = '',
-    [int]   $IntervalMin = 5
+    [int]   $IntervalMin = 60
 )
 
 Set-StrictMode -Version Latest
