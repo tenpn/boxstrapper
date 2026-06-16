@@ -102,7 +102,16 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
-# --- 7. other idempotent setup steps go here -------------------------------
+# --- 7. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
+& (Join-Path $PSScriptRoot 'Gitea-Backup-Setup.ps1') `
+    -SecretsFile    $secretsFile `
+    -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
+    -R2Bucket       $secrets['R2_BUCKET'] `
+    -R2AccessKeyId  $secrets['R2_ACCESS_KEY_ID'] `
+    -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
+    -ResticPassword $secrets['RESTIC_PASSWORD']
+
+# --- 8. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
