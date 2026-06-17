@@ -4,11 +4,21 @@
     Dump Gitea and push an encrypted snapshot to Cloudflare R2 via restic. Best-effort, monitored.
 .DESCRIPTION
     Run on a daily schedule (as SYSTEM) by the task that Gitea-Backup-Setup.ps1 registers. Pipeline:
-      1. gitea dump            -> one consistent .zip (repos + SQLite DB + config + LFS + attachments)
+      1. gitea dump            -> one consistent .zip (repos + SQLite DB + config + LFS + attachments).
+                                  The 'gitea' service is STOPPED for the dump and restarted right after
+                                  (see SERVICE below); only this step needs it down.
       2. restic backup <.zip>  -> Cloudflare R2, client-side encrypted BEFORE upload
       3. restic forget --prune -> GFS retention (keep 7 daily / 4 weekly / 6 monthly)
       4. trim local staging    -> keep only the newest archive (a fast, no-network restore copy)
       5. ping Healthchecks.io  -> success URL on a clean run, <url>/fail (with a log tail) otherwise
+
+    SERVICE -- why the dump stops Gitea:
+    gitea dump packs the whole data dir, and while Gitea runs it holds an exclusive Windows handle on
+    data\queues\common\LOCK (the LevelDB queue lock); Windows then refuses to let the dump read it and
+    the dump aborts. So the service is stopped for the dump and restarted in a finally -- it always
+    comes back up even when the dump throws, so the box is never left with Gitea down. Downtime is just
+    the dump (~15-20s) once a day. Because this stops a service, MANUAL runs need an ELEVATED shell;
+    the scheduled task already runs as SYSTEM, so the nightly run is unaffected.
 
     SECRETS -- why this worker reads secrets.ini directly:
     The R2 secret key and RESTIC_PASSWORD are NOT baked into the scheduled-task argument, because that
@@ -45,6 +55,7 @@
 param(
     [Parameter(Mandatory)][string]$SecretsFile,
     [string]$WorkDir     = 'C:\gitea',
+    [string]$ServiceName = 'gitea',
     [string]$StagingDir  = 'C:\gitea\backup\staging',
     [int]   $KeepDaily   = 7,
     [int]   $KeepWeekly  = 4,
@@ -141,22 +152,44 @@ try {
         New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
     }
 
-    # --- 1. gitea dump ------------------------------------------------------
+    # --- 1. gitea dump (service stopped so the data\queues LevelDB LOCK is free) ---
     # Staging lives under C:\gitea\backup (NOT under data/ or the repo root), so the dump never
     # tries to include itself. gitea writes temp files into the cwd, so run from the staging dir.
+    # While Gitea runs it holds an exclusive Windows handle on data\queues\common\LOCK, which the
+    # dump (it packs the whole data dir) cannot read -> the dump aborts. So stop the service for the
+    # dump, then ALWAYS restart it (finally) -- a dump failure still propagates to the outer catch
+    # (and pings /fail), but the box never ends with Gitea down. Only the dump needs it stopped;
+    # the restic upload/prune below run with Gitea already back up, keeping downtime to the dump.
     $stamp      = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss')
     $dumpFile   = Join-Path $StagingDir "gitea-dump-$stamp.zip"
     $configPath = Join-Path $WorkDir 'custom\conf\app.ini'
     $env:GITEA_WORK_DIR = $WorkDir
-    Write-Host "[boxstrapper] Dumping Gitea -> $dumpFile" -ForegroundColor Cyan
-    Push-Location -LiteralPath $StagingDir
-    try {
-        $r = Invoke-Native $giteaExe @('dump', '--config', $configPath, '--type', 'zip', '--file', $dumpFile)
-    } finally {
-        Pop-Location
+
+    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    $stoppedService = $false
+    if ($svc -and $svc.Status -eq 'Running') {
+        Write-Host "[boxstrapper] Stopping '$ServiceName' for a consistent dump..." -ForegroundColor Cyan
+        Stop-Service -Name $ServiceName
+        Start-Sleep -Seconds 2            # let NSSM fully release the data\queues LevelDB LOCK
+        $stoppedService = $true
     }
-    if ($r.Code -ne 0) { throw "gitea dump failed (exit $($r.Code)): $($r.Output.Trim())" }
-    if (-not (Test-Path -LiteralPath $dumpFile)) { throw "gitea dump reported success but $dumpFile is missing." }
+    try {
+        Write-Host "[boxstrapper] Dumping Gitea -> $dumpFile" -ForegroundColor Cyan
+        Push-Location -LiteralPath $StagingDir
+        try {
+            $r = Invoke-Native $giteaExe @('dump', '--config', $configPath, '--type', 'zip', '--file', $dumpFile)
+        } finally {
+            Pop-Location
+        }
+        if ($r.Code -ne 0) { throw "gitea dump failed (exit $($r.Code)): $($r.Output.Trim())" }
+        if (-not (Test-Path -LiteralPath $dumpFile)) { throw "gitea dump reported success but $dumpFile is missing." }
+    } finally {
+        if ($stoppedService) {
+            Write-Host "[boxstrapper] Restarting '$ServiceName'..." -ForegroundColor Cyan
+            try { Start-Service -Name $ServiceName }
+            catch { Write-Warning "[boxstrapper] Failed to restart '$ServiceName': $($_.Exception.Message)" }
+        }
+    }
 
     # --- 2. restic backup (client-side encrypted, uploaded to R2) -----------
     Write-Host "[boxstrapper] restic backup -> $($env:RESTIC_REPOSITORY)" -ForegroundColor Cyan
