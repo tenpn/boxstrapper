@@ -35,18 +35,24 @@
     Healthchecks rather than thrown. Stays Windows PowerShell 5.1-safe (no ternary / null-coalescing)
     because the scheduled task launches powershell.exe, not pwsh.
 
-    RESTORE (disaster runbook):
-      1. Install restic and set these env vars (from secrets.ini):
+    RESTORE: Restore-Gitea.ps1 automates this end to end (restic restore latest -> expand the dump ->
+    rebuild the SQLite DB from gitea-db.sql -> place custom/ + data/ + repos/ -> patch RUN_USER ->
+    restart). Update-Box.ps1 runs it with -OnlyIfEmpty so a rebuilt box comes back up on its last
+    backup; run it directly (elevated) to force a restore over an existing instance:
+         .\Restore-Gitea.ps1 -SecretsFile .\secrets.ini            # prompts before overwriting
+         .\Restore-Gitea.ps1 -SecretsFile .\secrets.ini -Force     # no prompt
+    The manual equivalent (for reference / partial recovery), with env vars set from secrets.ini:
            RESTIC_REPOSITORY  = s3:https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com/<R2_BUCKET>
            RESTIC_PASSWORD    = <RESTIC_PASSWORD>
            AWS_ACCESS_KEY_ID  = <R2_ACCESS_KEY_ID>
            AWS_SECRET_ACCESS_KEY = <R2_SECRET_ACCESS_KEY>
            AWS_DEFAULT_REGION = auto
-      2. restic snapshots                                   # pick a snapshot id
+      1. restic snapshots                                   # pick a snapshot id
          restic restore <id> --target C:\restore
-      3. Unzip the recovered gitea-dump-*.zip, then follow Gitea's restore steps: stop the service,
-         restore data/gitea.db + the repo dirs + custom/ + data/ into C:\gitea, start the service.
-      4. restic check verifies repo integrity; do a periodic test-restore to prove recoverability.
+      2. Unzip the recovered gitea-dump-*.zip, then follow Gitea's restore steps: stop the service,
+         rebuild the DB (sqlite3 gitea.db < gitea-db.sql -- the dump stores SQL text, not a raw .db),
+         restore custom/ + data/ + repos/ into C:\gitea, start the service.
+      3. restic check verifies repo integrity; do a periodic test-restore to prove recoverability.
       KEEP RESTIC_PASSWORD SAFE: without it the offsite backups are unrecoverable. Escrow a copy in a
       password manager off the box, not only in secrets.ini.
 #>

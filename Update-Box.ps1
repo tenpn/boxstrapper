@@ -111,7 +111,24 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 8. other idempotent setup steps go here -------------------------------
+# --- 8. Restore Gitea from the latest offsite snapshot (only if this box has no data yet) ---
+# On a REBUILD pointed at an existing R2 repo this brings the box back up on its last backup instead
+# of an empty web installer; section 7 above guarantees the repo exists first. A no-op once gitea.db
+# is present, so re-running Update-Box never clobbers live data -- run Restore-Gitea.ps1 directly
+# (it then prompts) to force a restore over existing data. Wrapped so a restore hiccup never wedges
+# the bootstrap.
+try {
+    & (Join-Path $PSScriptRoot 'Restore-Gitea.ps1') -SecretsFile $secretsFile -OnlyIfEmpty
+} catch {
+    Write-Host "[boxstrapper] Auto-restore skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+} finally {
+    # Restore-Gitea.ps1 runs inline (same process), so it sets restic/R2 creds in THIS env. Clear
+    # them on every exit path -- the same hygiene Gitea-Backup-Setup.ps1 applies to its inline run.
+    Remove-Item Env:RESTIC_REPOSITORY, Env:RESTIC_PASSWORD, Env:AWS_ACCESS_KEY_ID, `
+                Env:AWS_SECRET_ACCESS_KEY, Env:AWS_DEFAULT_REGION -ErrorAction SilentlyContinue
+}
+
+# --- 9. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
