@@ -13,6 +13,13 @@
 
     On first start with no app.ini, Gitea serves its web installer on
     http://localhost:3000 -- finish setup there (or drop in a pre-baked app.ini).
+
+    RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them, same as it does to
+    Gitea-Backup-Setup.ps1), this configures the service but does NOT start it, calls the internal
+    Restore-Gitea.ps1 worker while it's stopped, then starts the service exactly once. So a rebuilt box
+    that has an offsite backup comes up directly on the restored data instead of being started empty by
+    setup and then bounced by a separate restore. A no-op unless the box has no data yet AND a snapshot
+    exists; an unconfigured/sandbox box just starts to the web installer as before.
 #>
 
 [CmdletBinding()]
@@ -24,7 +31,15 @@ param(
     # Public hostname Gitea is reached at through the Cloudflare Tunnel, e.g.
     # 'git.example.com'. Sets ROOT_URL/DOMAIN so Gitea emits correct links.
     # Leave empty for local sandbox testing (Gitea derives the URL from the request).
-    [string]$PublicHostname = ''
+    [string]$PublicHostname = '',
+    # R2 + restic credentials for the optional pre-start restore (forwarded to the Restore-Gitea.ps1
+    # worker). Update-Box.ps1 passes these from secrets.ini, same as it does to Gitea-Backup-Setup.ps1.
+    # Blank => no restore (e.g. local sandbox testing); the box just starts to the web installer.
+    [string]$R2AccountId    = '',
+    [string]$R2Bucket       = '',
+    [string]$R2AccessKeyId  = '',
+    [string]$R2SecretKey    = '',
+    [string]$ResticPassword = ''
 )
 
 Set-StrictMode -Version Latest
@@ -144,7 +159,27 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 #   & $nssm set $ServiceName Start SERVICE_DELAYED_AUTO_START
 #   & $nssm set $ServiceName DependOnService mariadb   # if using an external DB service
 
-# --- ensure it's running ---------------------------------------------------
+# --- restore an offsite backup BEFORE the first start, if applicable -------
+# The service is configured but NOT started yet, so a fresh box that has an offsite backup is restored
+# onto disk here and then started once (below) on the recovered data -- no start-then-bounce churn.
+# The worker leaves the service alone (we own the start). Best-effort: a restore hiccup must never wedge
+# provisioning, so we note it and carry on to a normal start (the box then shows the web installer).
+# A no-op without R2 creds, on a box that already has data, or when there's no snapshot to restore.
+if ($R2AccountId) {
+    try {
+        & (Join-Path $PSScriptRoot 'Restore-Gitea.ps1') `
+            -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
+            -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword -WorkDir $WorkDir
+    } catch {
+        Write-Host "[boxstrapper] Auto-restore skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+    } finally {
+        # Restore-Gitea.ps1 runs inline (same process) and sets restic/R2 creds in this env; clear them.
+        Remove-Item Env:RESTIC_REPOSITORY, Env:RESTIC_PASSWORD, Env:AWS_ACCESS_KEY_ID, `
+                    Env:AWS_SECRET_ACCESS_KEY, Env:AWS_DEFAULT_REGION -ErrorAction SilentlyContinue
+    }
+}
+
+# --- ensure it's running (single start point, on restored data if we just restored) ---
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) { throw "Service '$ServiceName' not found after install." }
 if ($svc.Status -ne 'Running') {

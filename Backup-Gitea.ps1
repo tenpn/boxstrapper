@@ -35,13 +35,12 @@
     Healthchecks rather than thrown. Stays Windows PowerShell 5.1-safe (no ternary / null-coalescing)
     because the scheduled task launches powershell.exe, not pwsh.
 
-    RESTORE: Restore-Gitea.ps1 automates this end to end (restic restore latest -> expand the dump ->
-    rebuild the SQLite DB from gitea-db.sql -> place custom/ + data/ + repos/ -> patch RUN_USER ->
-    restart). Update-Box.ps1 runs it with -OnlyIfEmpty so a rebuilt box comes back up on its last
-    backup; run it directly (elevated) to force a restore over an existing instance:
-         .\Restore-Gitea.ps1 -SecretsFile .\secrets.ini            # prompts before overwriting
-         .\Restore-Gitea.ps1 -SecretsFile .\secrets.ini -Force     # no prompt
-    The manual equivalent (for reference / partial recovery), with env vars set from secrets.ini:
+    RESTORE: a rebuilt box restores itself automatically -- Gitea-Setup.ps1 runs the internal
+    Restore-Gitea.ps1 worker during the bootstrap (after configuring the service, before starting it),
+    so an EMPTY box comes up on its last backup (restic restore latest -> rebuild the SQLite DB from
+    gitea-db.sql -> place custom/ + data/ + repos/ -> patch RUN_USER -> single start). Disaster recovery
+    is therefore just "re-bootstrap the box". To restore ad-hoc onto an EXISTING instance, do it by hand
+    with restic + sqlite3 (env vars set from secrets.ini):
            RESTIC_REPOSITORY  = s3:https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com/<R2_BUCKET>
            RESTIC_PASSWORD    = <RESTIC_PASSWORD>
            AWS_ACCESS_KEY_ID  = <R2_ACCESS_KEY_ID>
