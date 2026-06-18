@@ -12,7 +12,8 @@
     service is reconfigured in place rather than recreated.
 
     On first start with no app.ini, Gitea serves its web installer on
-    http://localhost:3000 -- finish setup there (or drop in a pre-baked app.ini).
+    http://localhost:3000 -- finish setup there (or drop in a pre-baked app.ini). Remote access is
+    over Tailscale (Tailscale-Setup.ps1 runs `tailscale serve` against this loopback port).
 
     RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them, same as it does to
     Gitea-Backup-Setup.ps1), this configures the service but does NOT start it, calls the internal
@@ -28,8 +29,8 @@ param(
     # Keep this path space-free: the service's command line is stored unquoted,
     # so a space in the config path would split Gitea's --config argument.
     [string]$WorkDir     = 'C:\gitea',
-    # Public hostname Gitea is reached at through the Cloudflare Tunnel, e.g.
-    # 'git.example.com'. Sets ROOT_URL/DOMAIN so Gitea emits correct links.
+    # Public hostname Gitea is reached at on the tailnet -- its MagicDNS name, e.g.
+    # 'box.tailnet-name.ts.net'. Sets ROOT_URL/DOMAIN so Gitea emits correct links.
     # Leave empty for local sandbox testing (Gitea derives the URL from the request).
     [string]$PublicHostname = '',
     # R2 + restic credentials for the optional pre-start restore (forwarded to the Restore-Gitea.ps1
@@ -105,7 +106,7 @@ foreach ($d in @($WorkDir, $confDir, $logDir, (Join-Path $WorkDir 'data'))) {
 if (-not (Test-Path $configPath)) {
     $runUser = "$env:COMPUTERNAME`$"
     $dbPath  = ($WorkDir -replace '\\', '/') + '/data/gitea.db'
-    # When fronted by Cloudflare Tunnel, ROOT_URL/DOMAIN make Gitea emit correct links.
+    # When fronted by Tailscale serve, ROOT_URL/DOMAIN make Gitea emit correct links.
     $hostLines = ''
     if ($PublicHostname) {
         $hostLines = "ROOT_URL = https://$PublicHostname/`r`nDOMAIN   = $PublicHostname`r`n"
@@ -114,8 +115,8 @@ if (-not (Test-Path $configPath)) {
 RUN_USER = $runUser
 
 [server]
-; Bind to loopback only -- the box is reached via the Cloudflare Tunnel connector
-; running locally, so Gitea must never be exposed on the LAN/WAN directly.
+; Bind to loopback only -- the box is reached via `tailscale serve` running locally
+; (it proxies the tailnet to this port), so Gitea must never be exposed on the LAN/WAN directly.
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = 3000
 $hostLines

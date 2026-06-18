@@ -9,8 +9,8 @@
       - registers a daily scheduled task (as SYSTEM) that runs Backup-Gitea.ps1, which does
         gitea dump -> restic backup -> forget/prune -> local trim -> Healthchecks ping.
 
-    Cloudflare R2 is the offsite store (10 GB free tier, zero egress, S3-compatible) -- it reuses the
-    same Cloudflare account as the tunnel. A personal Gitea dump comfortably fits the free tier.
+    Cloudflare R2 is the offsite store (10 GB free tier, zero egress, S3-compatible). A personal
+    Gitea dump comfortably fits the free tier.
 
     SECRETS: the R2 keys + restic password arrive as params (Update-Box.ps1 parses them out of
     secrets.ini, same pattern as the other setup steps) -- this script needs them at provision time to

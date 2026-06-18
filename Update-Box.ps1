@@ -100,8 +100,8 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 4. Cloudflare Tunnel connector (remote access; skips if no token) ------
-& (Join-Path $PSScriptRoot 'Cloudflare-Tunnel-Setup.ps1') -Token $secrets['CF_TUNNEL_TOKEN']
+# --- 4. Tailscale (joins the tailnet + publishes Gitea via `tailscale serve`; skips if no auth key) ---
+& (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
 # --- 5. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
 & (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_PING_URL']

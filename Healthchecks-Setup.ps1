@@ -10,8 +10,8 @@
     look different in the dashboard.
 
     This COMPLEMENTS, and does not replace, an external poll of your public hostname: the
-    heartbeat proves the box+Gitea are alive; only an outside check of https://<host> proves
-    the Cloudflare Tunnel path is actually reachable end to end.
+    heartbeat proves the box+Gitea are alive; only an outside check of https://<host>.ts.net
+    proves the Tailscale serve path is actually reachable end to end.
 
     The ping URL is a secret-ish token; it is never committed. Create a check at
     https://healthchecks.io (set its period to match -IntervalMin, plus a little grace), copy

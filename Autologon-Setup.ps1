@@ -5,7 +5,7 @@
 .DESCRIPTION
     Configures the box to log a user in automatically at boot, so an interactive desktop
     session is up without anyone at the keyboard (RDP convenience, user-session apps, or
-    interactive scheduled tasks). Note the Gitea/cloudflared services run under their own
+    interactive scheduled tasks). Note the Gitea/Tailscale services run under their own
     accounts and do NOT need this -- autologon is only for the desktop session.
 
     Uses Sysinternals Autologon rather than writing the Winlogon registry values by hand:
