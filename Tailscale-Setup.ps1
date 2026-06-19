@@ -106,10 +106,16 @@ if ($LASTEXITCODE -ne 0) {
 # --- publish Jenkins on the SAME HTTPS endpoint under /jenkins --------------
 # Path-based muxing: '/' -> Gitea:3000, '$JenkinsPath' -> Jenkins:8080 (longest-prefix match), so
 # both share one tailnet HTTPS cert/port. Non-fatal on its own: Gitea is already published, so a
-# Jenkins-serve hiccup just warns. Jenkins must carry a matching --prefix (Jenkins-Setup.ps1) so
-# its links resolve, since tailscale forwards the path through to the backend.
+# Jenkins-serve hiccup just warns.
+# CRITICAL: `tailscale serve --set-path=/jenkins` STRIPS the mount prefix before proxying -- the
+# backend would otherwise receive '/' and Jenkins (which runs under --prefix=/jenkins,
+# Jenkins-Setup.ps1) would 404. (Verified empirically: a bare-port target made https://host/jenkins
+# 404 from Jetty with the received URI logged as '/'.) So the proxy target carries the path too:
+# tailscale strips the inbound '/jenkins' and then re-joins the TARGET's '/jenkins', netting the
+# backend the full '/jenkins/...' that matches Jenkins' --prefix. The target path must equal
+# $JenkinsPath for the round-trip to cancel out.
 Write-Host "[boxstrapper] Publishing Jenkins (127.0.0.1:$JenkinsPort) at the tailnet path '$JenkinsPath'..." -ForegroundColor Cyan
-& $tailscale serve --bg --set-path=$JenkinsPath $JenkinsPort
+& $tailscale serve --bg --set-path=$JenkinsPath "http://127.0.0.1:$JenkinsPort$JenkinsPath"
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "tailscale serve for Jenkins failed (exit code $LASTEXITCODE); Jenkins is NOT yet published at '$JenkinsPath'."
     Write-Host    "  Gitea is published; re-run Update-Box.ps1 once HTTPS Certificates + MagicDNS are confirmed enabled."
