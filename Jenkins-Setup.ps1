@@ -37,8 +37,9 @@
 param(
     [string]$ServiceName = 'Jenkins',
     [int]   $Port        = 8080,
-    # Tailnet path Jenkins is served under (must match Tailscale-Setup.ps1's -JenkinsPath). Jenkins
-    # is told this via --prefix so its links/assets resolve behind the subpath reverse proxy.
+    # Tailnet path Jenkins is served under. Used TWICE: Jenkins is told it via --prefix so its
+    # links/assets resolve behind the subpath reverse proxy, AND it's the `tailscale serve` mount this
+    # script publishes Jenkins under at the end.
     [string]$Prefix      = '/jenkins'
 )
 
@@ -55,6 +56,26 @@ if (-not (Test-Admin)) {
     throw 'Jenkins-Setup.ps1 must run in an elevated PowerShell (reconfiguring a service needs admin).'
 }
 if (-not $Prefix.StartsWith('/')) { $Prefix = '/' + $Prefix }
+
+function Resolve-TailscaleExe {
+    # Returns the tailscale.exe path, or $null on a box without Tailscale (e.g. a local sandbox) --
+    # the publish step is then skipped, not fatal.
+    $cmd = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $known = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+    if (Test-Path $known) { return $known }
+    return $null
+}
+
+function Test-TailscaleUp {
+    # $true only if the Tailscale backend is Running (so `tailscale serve` will work).
+    param([string]$TailscaleExe)
+    if (-not $TailscaleExe) { return $false }
+    try {
+        $st = & $TailscaleExe status --json 2>$null | ConvertFrom-Json
+        return ($st -and $st.BackendState -eq 'Running')
+    } catch { return $false }
+}
 
 function Set-JenkinsArg {
     # Ensure "<Name>=<Value>" is present in the service's <arguments> string (the flags Jenkins'
@@ -190,5 +211,24 @@ if (Test-Path -LiteralPath $pwFile) {
     Write-Host "  (from $pwFile)" -ForegroundColor DarkGray
 } else {
     Write-Host "[boxstrapper] Setup wizard password will be at: $pwFile" -ForegroundColor DarkGray
+}
+
+# --- publish Jenkins on the tailnet at $Prefix (only when we're actually on the tailnet) ---------
+# TARGET-PATH serve (the backend URL carries $Prefix), UNLIKE Gitea's bare target: `tailscale serve
+# --set-path` STRIPS the mount prefix before proxying, but Jenkins ROUTES its own --prefix (Jetty
+# serves under $Prefix and 404s at '/'), so we put the path BACK on the target -- tailscale strips the
+# inbound $Prefix then re-joins the target's $Prefix, netting the backend the full '$Prefix/...' Jenkins
+# expects. Tailscale-Setup.ps1 already ran `serve reset`, so we just add our own mount. Non-fatal:
+# `tailscale serve` needs HTTPS Certificates + MagicDNS on the tailnet; a failure here just warns.
+$tailscale = Resolve-TailscaleExe
+if (Test-TailscaleUp -TailscaleExe $tailscale) {
+    Write-Host "[boxstrapper] Publishing Jenkins on the tailnet at '$Prefix'..." -ForegroundColor Cyan
+    & $tailscale serve --bg --set-path=$Prefix "http://127.0.0.1:$Port$Prefix"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "tailscale serve for Jenkins failed (exit $LASTEXITCODE); Jenkins isn't published at '$Prefix' yet."
+        Write-Host    "  Enable HTTPS Certificates + MagicDNS for the tailnet at https://login.tailscale.com/admin/dns, then re-run."
+    } else {
+        Write-Host "[boxstrapper] Jenkins published on the tailnet at '$Prefix'." -ForegroundColor Green
+    }
 }
 Write-Host "[boxstrapper] Finish setup at the tailnet URL under '$Prefix' (run 'tailscale serve status' for it)." -ForegroundColor DarkGray

@@ -12,8 +12,14 @@
     service is reconfigured in place rather than recreated.
 
     On first start with no app.ini, Gitea serves its web installer on
-    http://localhost:3000 -- finish setup there (or drop in a pre-baked app.ini). Remote access is
-    over Tailscale (Tailscale-Setup.ps1 runs `tailscale serve` against this loopback port).
+    http://localhost:3000 -- finish setup there (or drop in a pre-baked app.ini).
+
+    REMOTE ACCESS / ROUTING is owned HERE. Update-Box.ps1 runs Tailscale-Setup.ps1 first (joins the
+    tailnet, clears the `serve` surface), so by the time this runs the box's MagicDNS name exists. This
+    script reads that name, sets Gitea's ROOT_URL/DOMAIN to https://<name>/git/, and publishes Gitea at
+    /git via `tailscale serve` (a BARE serve target -- Gitea uses the strip subpath model, serving at
+    root while ROOT_URL makes it emit /git-prefixed links). Off the tailnet (sandbox / no auth key) all
+    of that is skipped and Gitea just stays loopback-only.
 
     RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them, same as it does to
     Gitea-Backup-Setup.ps1), this configures the service but does NOT start it, calls the internal
@@ -29,10 +35,13 @@ param(
     # Keep this path space-free: the service's command line is stored unquoted,
     # so a space in the config path would split Gitea's --config argument.
     [string]$WorkDir     = 'C:\gitea',
-    # Public hostname Gitea is reached at on the tailnet -- its MagicDNS name, e.g.
-    # 'box.tailnet-name.ts.net'. Sets ROOT_URL/DOMAIN so Gitea emits correct links.
-    # Leave empty for local sandbox testing (Gitea derives the URL from the request).
+    # OPTIONAL override for the public hostname. Normally left empty: this script reads the box's
+    # MagicDNS name from Tailscale (Update-Box.ps1 brings Tailscale up FIRST) and uses that for ROOT_URL.
+    # Set it only for local/manual use where you want a specific hostname without deriving it.
     [string]$PublicHostname = '',
+    # Tailnet sub-path Gitea is published under -- both the `tailscale serve` mount AND the sub-path
+    # baked into ROOT_URL (https://<host><Prefix>/). '' = published at the tailnet root.
+    [string]$Prefix = '/git',
     # R2 + restic credentials for the optional pre-start restore (forwarded to the Restore-Gitea.ps1
     # worker). Update-Box.ps1 passes these from secrets.ini, same as it does to Gitea-Backup-Setup.ps1.
     # Blank => no restore (e.g. local sandbox testing); the box just starts to the web installer.
@@ -58,6 +67,10 @@ if (-not (Test-Admin)) {
 if ($WorkDir -match '\s') {
     throw "WorkDir '$WorkDir' contains spaces. Pick a space-free path to avoid service argument-quoting issues."
 }
+# Normalize the sub-path: leading slash, no trailing slash (or '' for root) so ROOT_URL interpolates
+# to a clean https://<host><Prefix>/ and `--set-path=<Prefix>` is well-formed.
+if ($Prefix -and -not $Prefix.StartsWith('/')) { $Prefix = '/' + $Prefix }
+$Prefix = $Prefix.TrimEnd('/')
 if (-not $env:ChocolateyInstall) {
     $env:ChocolateyInstall = Join-Path $env:ProgramData 'chocolatey'
 }
@@ -83,6 +96,68 @@ function Resolve-GiteaExe {
     throw "Could not locate gitea.exe. Is the 'gitea' choco package installed?"
 }
 
+function Resolve-TailscaleExe {
+    # Returns the tailscale.exe path, or $null on a box without Tailscale (e.g. a local sandbox) --
+    # routing is then skipped, not fatal.
+    $cmd = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $known = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+    if (Test-Path $known) { return $known }
+    return $null
+}
+
+function Get-TailnetHostname {
+    # This box's MagicDNS FQDN (trailing dot trimmed) if Tailscale is CONNECTED, else $null. A non-null
+    # result implies the backend is Running, which is exactly what gates the serve step below.
+    param([string]$TailscaleExe)
+    if (-not $TailscaleExe) { return $null }
+    try {
+        $st = & $TailscaleExe status --json 2>$null | ConvertFrom-Json
+        if ($st -and $st.BackendState -eq 'Running' -and $st.Self -and $st.Self.DNSName) {
+            return $st.Self.DNSName.TrimEnd('.')
+        }
+    } catch { }
+    return $null
+}
+
+function Set-GiteaServerKey {
+    # Ensure "<Key> = <Value>" exists in app.ini's [server] section: replace the existing line if
+    # present, else insert it right after the [server] header. Line-by-line (not one big regex) so
+    # CRLF/LF endings and other sections are left untouched. Returns the (possibly unchanged) text.
+    param(
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Value
+    )
+    $lines     = $Text -split "`r?`n"
+    $out       = New-Object System.Collections.Generic.List[string]
+    $section   = ''
+    $serverIdx = -1
+    $done      = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $raw = $lines[$i]
+        $t   = $raw.Trim()
+        if ($t -match '^\[(.+)\]$') {
+            $section = $matches[1].Trim().ToLower()
+            if ($section -eq 'server') { $serverIdx = $out.Count }
+            $out.Add($raw); continue
+        }
+        if (-not $done -and $section -eq 'server' -and
+            $t -match ('^' + [regex]::Escape($Key) + '\s*=')) {
+            $out.Add("$Key = $Value"); $done = $true; continue
+        }
+        $out.Add($raw)
+    }
+    if (-not $done) {
+        if ($serverIdx -ge 0) {
+            $out.Insert($serverIdx + 1, "$Key = $Value")
+        } else {
+            $out.Add(''); $out.Add('[server]'); $out.Add("$Key = $Value")
+        }
+    }
+    return ($out -join "`r`n")
+}
+
 $giteaExe   = Resolve-GiteaExe
 $confDir    = Join-Path $WorkDir 'custom\conf'
 $configPath = Join-Path $confDir 'app.ini'
@@ -106,11 +181,8 @@ foreach ($d in @($WorkDir, $confDir, $logDir, (Join-Path $WorkDir 'data'))) {
 if (-not (Test-Path $configPath)) {
     $runUser = "$env:COMPUTERNAME`$"
     $dbPath  = ($WorkDir -replace '\\', '/') + '/data/gitea.db'
-    # When fronted by Tailscale serve, ROOT_URL/DOMAIN make Gitea emit correct links.
-    $hostLines = ''
-    if ($PublicHostname) {
-        $hostLines = "ROOT_URL = https://$PublicHostname/`r`nDOMAIN   = $PublicHostname`r`n"
-    }
+    # ROOT_URL/DOMAIN are intentionally NOT seeded here -- the routing step below sets them from the
+    # box's tailnet name (or -PublicHostname) once it's known, then restarts the service if needed.
     @"
 RUN_USER = $runUser
 
@@ -119,7 +191,7 @@ RUN_USER = $runUser
 ; (it proxies the tailnet to this port), so Gitea must never be exposed on the LAN/WAN directly.
 HTTP_ADDR = 127.0.0.1
 HTTP_PORT = 3000
-$hostLines
+
 [database]
 DB_TYPE = sqlite3
 PATH    = $dbPath
@@ -180,6 +252,39 @@ if ($R2AccountId) {
     }
 }
 
+# --- routing: set ROOT_URL from this box's tailnet name (the authority for its public URL) -------
+# Gitea is loopback-only and can't know its own public hostname. Update-Box.ps1 brought Tailscale up
+# FIRST, so the box's MagicDNS name is available now; read it (or take an explicit -PublicHostname
+# override) and ensure app.ini's [server] ROOT_URL=https://<host><Prefix>/ + DOMAIN=<host>, so Gitea
+# emits <Prefix>-prefixed links behind the reverse proxy. Track whether the file changed so the start
+# step below restarts an already-running service to pick it up. Best-effort: a hiccup just warns.
+$tailscale   = Resolve-TailscaleExe
+$derivedHost = Get-TailnetHostname -TailscaleExe $tailscale   # $null unless on the tailnet
+$tailnetHost = if ($PublicHostname) { $PublicHostname } else { $derivedHost }
+
+$rootUrlChanged = $false
+if ($tailnetHost -and (Test-Path -LiteralPath $configPath)) {
+    try {
+        $rootUrl = "https://$tailnetHost$Prefix/"
+        $orig    = Get-Content -LiteralPath $configPath -Raw
+        $patched = Set-GiteaServerKey -Text $orig    -Key 'ROOT_URL' -Value $rootUrl
+        $patched = Set-GiteaServerKey -Text $patched -Key 'DOMAIN'   -Value $tailnetHost
+        if ($patched -ne $orig) {
+            # ASCII matches the seed app.ini above; no BOM either way.
+            [System.IO.File]::WriteAllText($configPath, $patched, [System.Text.Encoding]::ASCII)
+            $rootUrlChanged = $true
+            $src = if ($PublicHostname) { 'override' } else { 'MagicDNS name' }
+            Write-Host "[boxstrapper] Set Gitea ROOT_URL=$rootUrl (from $src)." -ForegroundColor DarkGray
+        } else {
+            Write-Host "[boxstrapper] Gitea ROOT_URL already $rootUrl; left untouched." -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warning "Could not set Gitea ROOT_URL: $($_.Exception.Message) (Gitea keeps its current ROOT_URL)."
+    }
+} else {
+    Write-Host "[boxstrapper] Not on the tailnet (no hostname); leaving ROOT_URL to Gitea's default / web installer." -ForegroundColor DarkGray
+}
+
 # --- ensure it's running (single start point, on restored data if we just restored) ---
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) { throw "Service '$ServiceName' not found after install." }
@@ -190,6 +295,9 @@ if ($svc.Status -ne 'Running') {
     # scary-looking "Unexpected status SERVICE_START_PENDING" while it's merely
     # still initializing.
     Start-Service -Name $ServiceName
+} elseif ($rootUrlChanged) {
+    Write-Host "[boxstrapper] Restarting '$ServiceName' to apply the new ROOT_URL..." -ForegroundColor Cyan
+    Restart-Service -Name $ServiceName -Force
 } else {
     Write-Host "[boxstrapper] '$ServiceName' already running." -ForegroundColor Green
 }
@@ -208,4 +316,27 @@ if ($ready) {
     Write-Host "[boxstrapper] Gitea is responding -- finish setup at http://localhost:3000" -ForegroundColor Green
 } else {
     Write-Warning "Gitea service registered but http://localhost:3000 isn't answering yet. Check $logDir\service-stderr.log."
+}
+
+# --- publish Gitea on the tailnet at $Prefix (only when we're actually on the tailnet) -----------
+# BARE serve target (no path on the backend URL): `tailscale serve --set-path` STRIPS the mount prefix
+# before proxying, and Gitea uses the strip subpath model -- it serves at root and relies on the
+# ROOT_URL set above to emit <Prefix>-prefixed links, so the stripped '/' is exactly what the backend
+# wants. (Contrast Jenkins-Setup.ps1, which ROUTES its own --prefix and must put the path BACK on its
+# serve target.) Tailscale-Setup.ps1 already ran `serve reset`, so we just add our own mount. Non-fatal:
+# `tailscale serve` needs HTTPS Certificates + MagicDNS on the tailnet; a failure here just warns.
+if ($derivedHost -and $tailscale) {
+    if ($Prefix) {
+        Write-Host "[boxstrapper] Publishing Gitea on the tailnet at '$Prefix'..." -ForegroundColor Cyan
+        & $tailscale serve --bg --set-path=$Prefix 3000
+    } else {
+        Write-Host "[boxstrapper] Publishing Gitea on the tailnet at the root..." -ForegroundColor Cyan
+        & $tailscale serve --bg 3000
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "tailscale serve for Gitea failed (exit $LASTEXITCODE); Gitea isn't published at '$Prefix' yet."
+        Write-Host    "  Enable HTTPS Certificates + MagicDNS for the tailnet at https://login.tailscale.com/admin/dns, then re-run."
+    } else {
+        Write-Host "[boxstrapper] Gitea published on the tailnet at '$Prefix' (run 'tailscale serve status' for the URL)." -ForegroundColor Green
+    }
 }

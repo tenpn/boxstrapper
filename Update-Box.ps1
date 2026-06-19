@@ -130,8 +130,14 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     Write-Warning "VS Code ('code') is not on PATH yet; skipping extensions. Open a new shell and re-run Update-Box.ps1."
 }
 
-# --- 3. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, see ---
-#        Gitea-Setup.ps1 -- it configures the service, restores if there's a snapshot, then starts once).
+# --- 3. Tailscale (join the tailnet + reset the published `serve` surface to a clean slate) --------
+#        Runs BEFORE Gitea/Jenkins ON PURPOSE: it gets the box onto the tailnet so the public MagicDNS
+#        name exists, and each service script then publishes ITSELF on the tailnet (and Gitea reads that
+#        name for its ROOT_URL). Skips (box stays local) if no auth key.
+& (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
+
+# --- 4. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, then ---
+#        sets its own ROOT_URL from the tailnet name and publishes itself at /git -- see Gitea-Setup.ps1).
 #        The R2/restic creds are the same ones passed to the backup setup in section 8.
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
@@ -140,12 +146,9 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 4. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 just ---
-#        rebinds it loopback-only at 127.0.0.1:8080 and serves it under /jenkins -- no secrets). ---
+# --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
+#        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, then publishes it on the tailnet). ---
 & (Join-Path $PSScriptRoot 'Jenkins-Setup.ps1')
-
-# --- 5. Tailscale (joins the tailnet + publishes Gitea (/) and Jenkins (/jenkins); skips if no auth key) ---
-& (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
 # --- 6. Healthchecks.io heartbeats (dead-man's switch; one task per service, each skips if no URL) ---
 # Gitea uses the script's defaults (-HealthUrl /api/healthz on :3000, -Label Gitea, -SecretKey HC_GITEA_PING_URL).
