@@ -147,8 +147,17 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 5. Tailscale (joins the tailnet + publishes Gitea (/) and Jenkins (/jenkins); skips if no auth key) ---
 & (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
-# --- 6. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
-& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_PING_URL']
+# --- 6. Healthchecks.io heartbeats (dead-man's switch; one task per service, each skips if no URL) ---
+# Gitea uses the script's defaults (-HealthUrl /api/healthz on :3000, -Label Gitea, -SecretKey HC_GITEA_PING_URL).
+& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_GITEA_PING_URL']
+# Jenkins gets its OWN task/check, probing its loopback login page (200 even once secured). Port 8080 /
+# path /jenkins mirror Jenkins-Setup.ps1's hardcoded defaults (as Gitea's 3000 is hardcoded in two places).
+& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') `
+    -TaskName  'boxstrapper-heartbeat-jenkins' `
+    -PingUrl   $secrets['HC_JENKINS_PING_URL'] `
+    -HealthUrl 'http://127.0.0.1:8080/jenkins/login' `
+    -Label     'Jenkins' `
+    -SecretKey 'HC_JENKINS_PING_URL'
 
 # --- 7. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
