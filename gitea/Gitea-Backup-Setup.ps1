@@ -62,7 +62,7 @@ if (-not $R2AccountId -or -not $R2Bucket -or -not $R2AccessKeyId -or -not $R2Sec
     return
 }
 
-if (-not $SecretsFile) { $SecretsFile = Join-Path $PSScriptRoot 'secrets.ini' }
+if (-not $SecretsFile) { $SecretsFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'secrets.ini' }  # repo root, one level up from gitea\
 if (-not (Test-Path -LiteralPath $SecretsFile)) { throw "Secrets file not found ($SecretsFile)." }
 $SecretsFile = (Resolve-Path -LiteralPath $SecretsFile).Path   # absolute, for the SYSTEM task
 

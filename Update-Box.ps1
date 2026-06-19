@@ -93,7 +93,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 3. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, see ---
 #        Gitea-Setup.ps1 -- it configures the service, restores if there's a snapshot, then starts once).
 #        The R2/restic creds are the same ones passed to the backup setup in section 7.
-& (Join-Path $PSScriptRoot 'Gitea-Setup.ps1') `
+& (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
     -R2Bucket       $secrets['R2_BUCKET'] `
     -R2AccessKeyId  $secrets['R2_ACCESS_KEY_ID'] `
@@ -110,7 +110,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
 # --- 7. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
-& (Join-Path $PSScriptRoot 'Gitea-Backup-Setup.ps1') `
+& (Join-Path $PSScriptRoot 'gitea\Gitea-Backup-Setup.ps1') `
     -SecretsFile    $secretsFile `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
     -R2Bucket       $secrets['R2_BUCKET'] `
