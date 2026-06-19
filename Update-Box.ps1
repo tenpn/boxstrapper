@@ -34,6 +34,24 @@ function Update-Path {
     }
 }
 
+function Resolve-JavaHome {
+    # The temurin21 MSI sets the machine PATH but NOT JAVA_HOME by default, and the jenkins choco
+    # package ABORTS unless JAVA_HOME is set -- so derive the JDK location ourselves. Prefer a
+    # JAVA_HOME the MSI did set, else find the installed JDK by its well-known install roots.
+    $jh = [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine')
+    if ($jh -and (Test-Path (Join-Path $jh 'bin\java.exe'))) { return $jh }
+    foreach ($root in @((Join-Path ${env:ProgramFiles} 'Eclipse Adoptium'),
+                        (Join-Path ${env:ProgramFiles} 'Microsoft\jdk'))) {
+        if (Test-Path $root) {
+            $hit = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { Test-Path (Join-Path $_.FullName 'bin\java.exe') } |
+                   Sort-Object Name -Descending | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
+    return $null
+}
+
 function Read-Secrets {
     # Parse the INI secrets file into a hashtable. Value = everything after the first '='
     # (so base64 tokens ending in '==' survive); '#' comments and blank lines are ignored.
@@ -69,12 +87,28 @@ $secrets = Read-Secrets -Path $secretsFile
 
 # --- 1. apply the choco manifest -------------------------------------------
 $manifest = Join-Path $PSScriptRoot 'packages.config'
-# Jenkins' choco package ABORTS if no JDK is visible, and choco does not refresh THIS process's env
-# mid-manifest -- so install the JDK first and pull JAVA_HOME onto this session before the manifest
-# reaches the jenkins package. temurin21 is also in packages.config; this is just an ordering fix.
+# Jenkins' choco package ABORTS unless JAVA_HOME is set, but temurin21's MSI sets the machine PATH
+# and NOT JAVA_HOME -- so install the JDK first, then set JAVA_HOME (this process so the manifest's
+# choco child inherits it, and permanently so re-runs/other tools see it) BEFORE the manifest reaches
+# the jenkins package. temurin21 is also in packages.config; this is the ordering + JAVA_HOME fix.
 Write-Host "[boxstrapper] Ensuring a JDK is present for Jenkins (temurin21)..." -ForegroundColor Cyan
 choco install temurin21 -y
 Update-Path
+$javaHome = Resolve-JavaHome
+if ($javaHome) {
+    $env:JAVA_HOME = $javaHome
+    [Environment]::SetEnvironmentVariable('JAVA_HOME', $javaHome, 'Machine')
+    Write-Host "[boxstrapper] JAVA_HOME = $javaHome" -ForegroundColor DarkGray
+} else {
+    Write-Warning "Installed temurin21 but could not locate the JDK to set JAVA_HOME; the jenkins package may fail to install."
+}
+# sysinternals' choco package pins a SHA256 for SysinternalsSuite.zip, but Microsoft republishes that
+# zip IN PLACE at the same URL, so the pinned hash goes stale (and the manifest install fails on it)
+# until the maintainer catches up. The download is from Microsoft's own URL, so install it here with
+# --ignore-checksums scoped to JUST this package; the manifest then skips it (already installed).
+# Drop this line once the upstream package refreshes its checksum.
+Write-Host "[boxstrapper] Installing sysinternals (skipping its stale upstream checksum)..." -ForegroundColor Cyan
+choco install sysinternals -y --ignore-checksums
 Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor Cyan
 choco install $manifest -y
 Update-Path
