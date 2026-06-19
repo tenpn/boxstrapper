@@ -5,7 +5,7 @@
 .DESCRIPTION
     Safe to re-run any time. Installs everything in packages.config (skipping
     what is already present), then installs the VS Code extensions listed in
-    vs-extensions.txt. Add further idempotent setup steps in section 3.
+    vs-extensions.txt. Add further idempotent setup steps as a new numbered section below.
 #>
 
 [CmdletBinding()]
@@ -69,6 +69,12 @@ $secrets = Read-Secrets -Path $secretsFile
 
 # --- 1. apply the choco manifest -------------------------------------------
 $manifest = Join-Path $PSScriptRoot 'packages.config'
+# Jenkins' choco package ABORTS if no JDK is visible, and choco does not refresh THIS process's env
+# mid-manifest -- so install the JDK first and pull JAVA_HOME onto this session before the manifest
+# reaches the jenkins package. temurin21 is also in packages.config; this is just an ordering fix.
+Write-Host "[boxstrapper] Ensuring a JDK is present for Jenkins (temurin21)..." -ForegroundColor Cyan
+choco install temurin21 -y
+Update-Path
 Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor Cyan
 choco install $manifest -y
 Update-Path
@@ -92,7 +98,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 
 # --- 3. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, see ---
 #        Gitea-Setup.ps1 -- it configures the service, restores if there's a snapshot, then starts once).
-#        The R2/restic creds are the same ones passed to the backup setup in section 7.
+#        The R2/restic creds are the same ones passed to the backup setup in section 8.
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
     -R2Bucket       $secrets['R2_BUCKET'] `
@@ -100,16 +106,20 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 4. Tailscale (joins the tailnet + publishes Gitea via `tailscale serve`; skips if no auth key) ---
+# --- 4. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 just ---
+#        rebinds it loopback-only at 127.0.0.1:8080 and serves it under /jenkins -- no secrets). ---
+& (Join-Path $PSScriptRoot 'Jenkins-Setup.ps1')
+
+# --- 5. Tailscale (joins the tailnet + publishes Gitea (/) and Jenkins (/jenkins); skips if no auth key) ---
 & (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
-# --- 5. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
+# --- 6. Healthchecks.io heartbeat (dead-man's switch; skips if no URL) -------
 & (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_PING_URL']
 
-# --- 6. Autologon for the admin desktop session (skips if no password) ------
+# --- 7. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
-# --- 7. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
+# --- 8. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Backup-Setup.ps1') `
     -SecretsFile    $secretsFile `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
@@ -118,7 +128,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 8. other idempotent setup steps go here -------------------------------
+# --- 9. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green

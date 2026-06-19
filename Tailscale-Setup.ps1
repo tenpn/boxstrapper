@@ -1,12 +1,12 @@
 #Requires -Version 5
 <#
 .SYNOPSIS
-    Join the box to your Tailscale tailnet and publish Gitea on it via `tailscale serve`. Idempotent.
+    Join the box to your Tailscale tailnet and publish Gitea + Jenkins on it via `tailscale serve`. Idempotent.
 .DESCRIPTION
-    Remote access to Gitea is over Tailscale: the box joins your tailnet with an auth key, 
-    then `tailscale serve --bg 3000` publishes the loopback Gitea (http://127.0.0.1:3000) to the tailnet 
-    over HTTPS at https://<machine>.<tailnet>.ts.net -- reachable only by devices on your tailnet, 
-    never the LAN/WAN.
+    Remote access is over Tailscale: the box joins your tailnet with an auth key, then `tailscale serve`
+    publishes the two loopback services to the tailnet over HTTPS at https://<machine>.<tailnet>.ts.net --
+    Gitea (http://127.0.0.1:3000) at the root, and Jenkins (http://127.0.0.1:8080) under the /jenkins path
+    on the same HTTPS endpoint -- reachable only by devices on your tailnet, never the LAN/WAN.
 
     Two things are set up ONCE in the Tailscale admin console (https://login.tailscale.com), out of
     band:
@@ -31,8 +31,12 @@
 
 [CmdletBinding()]
 param(
-    [string]$AuthKey = '',
-    [int]   $Port    = 3000
+    [string]$AuthKey     = '',
+    [int]   $Port        = 3000,
+    # Jenkins is published under a path on the SAME HTTPS endpoint as Gitea (which is at the root).
+    # JenkinsPath must match Jenkins-Setup.ps1's -Prefix so the subpath reverse proxy lines up.
+    [int]   $JenkinsPort = 8080,
+    [string]$JenkinsPath = '/jenkins'
 )
 
 Set-StrictMode -Version Latest
@@ -86,11 +90,11 @@ if ($alreadyUp) {
     if ($LASTEXITCODE -ne 0) { throw "tailscale up failed (exit code $LASTEXITCODE). Is the auth key valid and unexpired?" }
 }
 
-# --- publish Gitea on the tailnet over HTTPS -------------------------------
+# --- publish Gitea on the tailnet over HTTPS (at the root) ------------------
 # Non-fatal on failure: `tailscale serve` needs HTTPS Certificates + MagicDNS enabled for the
 # tailnet (an out-of-band admin-console setting), so a failure here shouldn't wedge the rest of
 # Update-Box -- the box is still on the tailnet, only the HTTPS publish is pending.
-Write-Host "[boxstrapper] Publishing Gitea (127.0.0.1:$Port) to the tailnet via 'tailscale serve'..." -ForegroundColor Cyan
+Write-Host "[boxstrapper] Publishing Gitea (127.0.0.1:$Port) at the tailnet root via 'tailscale serve'..." -ForegroundColor Cyan
 & $tailscale serve --bg $Port
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "tailscale serve failed (exit code $LASTEXITCODE); Gitea is NOT yet published to the tailnet."
@@ -99,4 +103,18 @@ if ($LASTEXITCODE -ne 0) {
     return
 }
 
-Write-Host "[boxstrapper] Tailscale ready -- Gitea is on the tailnet (run 'tailscale serve status' for the URL)." -ForegroundColor Green
+# --- publish Jenkins on the SAME HTTPS endpoint under /jenkins --------------
+# Path-based muxing: '/' -> Gitea:3000, '$JenkinsPath' -> Jenkins:8080 (longest-prefix match), so
+# both share one tailnet HTTPS cert/port. Non-fatal on its own: Gitea is already published, so a
+# Jenkins-serve hiccup just warns. Jenkins must carry a matching --prefix (Jenkins-Setup.ps1) so
+# its links resolve, since tailscale forwards the path through to the backend.
+Write-Host "[boxstrapper] Publishing Jenkins (127.0.0.1:$JenkinsPort) at the tailnet path '$JenkinsPath'..." -ForegroundColor Cyan
+& $tailscale serve --bg --set-path=$JenkinsPath $JenkinsPort
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "tailscale serve for Jenkins failed (exit code $LASTEXITCODE); Jenkins is NOT yet published at '$JenkinsPath'."
+    Write-Host    "  Gitea is published; re-run Update-Box.ps1 once HTTPS Certificates + MagicDNS are confirmed enabled."
+} else {
+    Write-Host "[boxstrapper] Jenkins published at the tailnet path '$JenkinsPath'." -ForegroundColor Green
+}
+
+Write-Host "[boxstrapper] Tailscale ready -- Gitea (/) and Jenkins ($JenkinsPath) are on the tailnet (run 'tailscale serve status' for the URL)." -ForegroundColor Green
