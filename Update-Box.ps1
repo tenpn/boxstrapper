@@ -150,9 +150,13 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -HeartbeatPingUrl $secrets['HC_GITEA_PING_URL']
 
 # --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
-#        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, publishes it on the tailnet, and
-#        registers its own Healthchecks heartbeat). HC_JENKINS_PING_URL -> -HeartbeatPingUrl, parsed here. ---
-& (Join-Path $PSScriptRoot 'Jenkins-Setup.ps1') `
+#        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, pre-installs jenkins\plugins.txt,
+#        seeds an admin user (skipping the setup wizard), publishes it on the tailnet, and registers its
+#        own Healthchecks heartbeat). We only PARSE the secrets here and hand them in as params; a blank
+#        JENKINS_ADMIN_PASSWORD keeps the interactive wizard. HC_JENKINS_PING_URL -> -HeartbeatPingUrl. ---
+& (Join-Path $PSScriptRoot 'jenkins\Jenkins-Setup.ps1') `
+    -AdminUser        $secrets['JENKINS_ADMIN_USER'] `
+    -AdminPassword    $secrets['JENKINS_ADMIN_PASSWORD'] `
     -HeartbeatPingUrl $secrets['HC_JENKINS_PING_URL']
 
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
