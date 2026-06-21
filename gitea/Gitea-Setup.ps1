@@ -49,7 +49,11 @@ param(
     [string]$R2Bucket       = '',
     [string]$R2AccessKeyId  = '',
     [string]$R2SecretKey    = '',
-    [string]$ResticPassword = ''
+    [string]$ResticPassword = '',
+    # Healthchecks.io ping URL for THIS service's heartbeat (Update-Box.ps1 passes HC_GITEA_PING_URL
+    # from secrets.ini). Blank => no heartbeat (non-fatal). Owned here so disabling Gitea -- commenting
+    # its one Update-Box call -- also drops its monitoring (the self-contained-element convention).
+    [string]$HeartbeatPingUrl = ''
 )
 
 Set-StrictMode -Version Latest
@@ -339,4 +343,14 @@ if ($derivedHost -and $tailscale) {
     } else {
         Write-Host "[boxstrapper] Gitea published on the tailnet at '$Prefix' (run 'tailscale serve status' for the URL)." -ForegroundColor Green
     }
+}
+
+# --- register Gitea's own Healthchecks heartbeat (this element owns its monitoring) -------------
+# Uses Healthchecks-Setup.ps1's defaults, which ARE the Gitea ones (task 'boxstrapper-heartbeat',
+# /api/healthz on :3000, label Gitea, key HC_GITEA_PING_URL); we just hand it the ping URL. Blank URL
+# => it skips itself. Best-effort: monitoring setup must never wedge the service, so swallow errors.
+try {
+    & (Join-Path $PSScriptRoot '..\Healthchecks-Setup.ps1') -PingUrl $HeartbeatPingUrl
+} catch {
+    Write-Warning "Gitea heartbeat setup failed: $($_.Exception.Message) (monitoring only; the service is unaffected)."
 }

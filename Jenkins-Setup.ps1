@@ -40,7 +40,11 @@ param(
     # Tailnet path Jenkins is served under. Used TWICE: Jenkins is told it via --prefix so its
     # links/assets resolve behind the subpath reverse proxy, AND it's the `tailscale serve` mount this
     # script publishes Jenkins under at the end.
-    [string]$Prefix      = '/jenkins'
+    [string]$Prefix      = '/jenkins',
+    # Healthchecks.io ping URL for THIS service's heartbeat (Update-Box.ps1 passes HC_JENKINS_PING_URL
+    # from secrets.ini). Blank => no heartbeat (non-fatal). Owned here so disabling Jenkins -- commenting
+    # its one Update-Box call -- also drops its monitoring (the self-contained-element convention).
+    [string]$HeartbeatPingUrl = ''
 )
 
 Set-StrictMode -Version Latest
@@ -230,5 +234,20 @@ if (Test-TailscaleUp -TailscaleExe $tailscale) {
     } else {
         Write-Host "[boxstrapper] Jenkins published on the tailnet at '$Prefix'." -ForegroundColor Green
     }
+}
+
+# --- register Jenkins' own Healthchecks heartbeat (this element owns its monitoring) ------------
+# Generic Healthchecks-Setup.ps1, called with Jenkins' OWN task/label/key and its loopback login probe
+# (/login stays 200 even once Jenkins security is on, unlike the root which 403s). Blank URL => it skips
+# itself. Best-effort: monitoring setup must never wedge the service, so swallow errors.
+try {
+    & (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') `
+        -TaskName  'boxstrapper-heartbeat-jenkins' `
+        -PingUrl   $HeartbeatPingUrl `
+        -HealthUrl "http://127.0.0.1:$Port$Prefix/login" `
+        -Label     'Jenkins' `
+        -SecretKey 'HC_JENKINS_PING_URL'
+} catch {
+    Write-Warning "Jenkins heartbeat setup failed: $($_.Exception.Message) (monitoring only; the service is unaffected)."
 }
 Write-Host "[boxstrapper] Finish setup at the tailnet URL under '$Prefix' (run 'tailscale serve status' for it)." -ForegroundColor DarkGray

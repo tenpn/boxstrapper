@@ -137,35 +137,28 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 & (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
 # --- 4. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, then ---
-#        sets its own ROOT_URL from the tailnet name and publishes itself at /git -- see Gitea-Setup.ps1).
-#        The R2/restic creds are the same ones passed to the backup setup in section 8.
+#        sets its own ROOT_URL from the tailnet name, publishes itself at /git, and registers its own
+#        Healthchecks heartbeat -- see Gitea-Setup.ps1). The R2/restic creds are the same ones passed to
+#        the backup setup in section 7. We only PARSE the secrets here and hand them in as params
+#        (HC_GITEA_PING_URL -> -HeartbeatPingUrl); the script itself never reads secrets.ini.
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
-    -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
-    -R2Bucket       $secrets['R2_BUCKET'] `
-    -R2AccessKeyId  $secrets['R2_ACCESS_KEY_ID'] `
-    -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
-    -ResticPassword $secrets['RESTIC_PASSWORD']
+    -R2AccountId      $secrets['R2_ACCOUNT_ID'] `
+    -R2Bucket         $secrets['R2_BUCKET'] `
+    -R2AccessKeyId    $secrets['R2_ACCESS_KEY_ID'] `
+    -R2SecretKey      $secrets['R2_SECRET_ACCESS_KEY'] `
+    -ResticPassword   $secrets['RESTIC_PASSWORD'] `
+    -HeartbeatPingUrl $secrets['HC_GITEA_PING_URL']
 
 # --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
-#        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, then publishes it on the tailnet). ---
-& (Join-Path $PSScriptRoot 'Jenkins-Setup.ps1')
+#        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, publishes it on the tailnet, and
+#        registers its own Healthchecks heartbeat). HC_JENKINS_PING_URL -> -HeartbeatPingUrl, parsed here. ---
+& (Join-Path $PSScriptRoot 'Jenkins-Setup.ps1') `
+    -HeartbeatPingUrl $secrets['HC_JENKINS_PING_URL']
 
-# --- 6. Healthchecks.io heartbeats (dead-man's switch; one task per service, each skips if no URL) ---
-# Gitea uses the script's defaults (-HealthUrl /api/healthz on :3000, -Label Gitea, -SecretKey HC_GITEA_PING_URL).
-& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') -PingUrl $secrets['HC_GITEA_PING_URL']
-# Jenkins gets its OWN task/check, probing its loopback login page (200 even once secured). Port 8080 /
-# path /jenkins mirror Jenkins-Setup.ps1's hardcoded defaults (as Gitea's 3000 is hardcoded in two places).
-& (Join-Path $PSScriptRoot 'Healthchecks-Setup.ps1') `
-    -TaskName  'boxstrapper-heartbeat-jenkins' `
-    -PingUrl   $secrets['HC_JENKINS_PING_URL'] `
-    -HealthUrl 'http://127.0.0.1:8080/jenkins/login' `
-    -Label     'Jenkins' `
-    -SecretKey 'HC_JENKINS_PING_URL'
-
-# --- 7. Autologon for the admin desktop session (skips if no password) ------
+# --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
-# --- 8. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
+# --- 7. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Backup-Setup.ps1') `
     -SecretsFile    $secretsFile `
     -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
@@ -174,7 +167,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword $secrets['RESTIC_PASSWORD']
 
-# --- 9. other idempotent setup steps go here -------------------------------
+# --- 8. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
