@@ -66,7 +66,7 @@ param(
     [string]$PluginsFile = (Join-Path $PSScriptRoot 'plugins.txt'),
     # Pinned plugin-installation-manager-tool release used to fetch/resolve the plugins. Bump as needed;
     # a download failure is non-fatal (it just warns and skips plugin install this run).
-    [string]$PluginCliVersion = '2.13.2'
+    [string]$PluginCliVersion = '2.15.0'
 )
 
 Set-StrictMode -Version Latest
@@ -118,6 +118,27 @@ function Resolve-JavaExe {
     $cmd = Get-Command java -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     return $null
+}
+
+function Get-FileFromUrl {
+    # Robust download: prefer curl.exe (ships with Windows 10/11) -- it follows GitHub's redirect to the
+    # release CDN and negotiates TLS reliably, sidestepping Invoke-WebRequest's occasional "The request
+    # was aborted: The connection was closed unexpectedly." on that redirect. NOTE: call curl.EXE
+    # explicitly -- bare 'curl' is a PowerShell alias for Invoke-WebRequest. -f makes an HTTP error (e.g.
+    # a 404 for a wrong asset name) a non-zero exit instead of a saved error page. Falls back to
+    # Invoke-WebRequest when curl.exe is absent.
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$OutFile
+    )
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & $curl.Source -fSL --retry 3 --retry-delay 2 -o $OutFile $Url
+        if ($LASTEXITCODE -ne 0) { throw "curl.exe exited $LASTEXITCODE downloading $Url" }
+    } else {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    }
 }
 
 function Set-JenkinsArg {
@@ -341,12 +362,16 @@ if ($pluginLines.Count -gt 0) {
         try {
             $java = Resolve-JavaExe
             if (-not $java) { throw 'no JVM found (JAVA_HOME unset and java not on PATH).' }
-            $cliJar = Join-Path $installDir "jenkins-plugin-cli-$PluginCliVersion.jar"
+            # The GitHub release asset is named jenkins-plugin-manager-<ver>.jar 
+            # Download to a temp then move, so a failed/partial download
+            # never leaves a poisoned jar that the Test-Path guard below would later trust.
+            $cliJar = Join-Path $installDir "jenkins-plugin-manager-$PluginCliVersion.jar"
             if (-not (Test-Path -LiteralPath $cliJar)) {
-                Write-Host "[boxstrapper] Downloading jenkins-plugin-cli $PluginCliVersion..." -ForegroundColor Cyan
-                [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-                $cliUrl = "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/$PluginCliVersion/jenkins-plugin-cli.jar"
-                Invoke-WebRequest -Uri $cliUrl -OutFile $cliJar -UseBasicParsing
+                Write-Host "[boxstrapper] Downloading jenkins-plugin-manager $PluginCliVersion..." -ForegroundColor Cyan
+                $cliUrl = "https://github.com/jenkinsci/plugin-installation-manager-tool/releases/download/$PluginCliVersion/jenkins-plugin-manager-$PluginCliVersion.jar"
+                $cliTmp = "$cliJar.download"
+                Get-FileFromUrl -Url $cliUrl -OutFile $cliTmp
+                Move-Item -LiteralPath $cliTmp -Destination $cliJar -Force
             }
             # Stop the service so the plugins dir is writable, then install.
             if ((Get-Service -Name $ServiceName).Status -eq 'Running') {
@@ -355,7 +380,7 @@ if ($pluginLines.Count -gt 0) {
             }
             $pluginsDir = Join-Path $jenkinsHome 'plugins'
             New-Item -ItemType Directory -Force -Path $pluginsDir | Out-Null
-            $cliArgs = @('-jar', $cliJar, '--plugin-file', $PluginsFile, '--plugin-download-directory', $pluginsDir, '--latest', 'false')
+            $cliArgs = @('-jar', $cliJar, '--plugin-file', $PluginsFile, '--plugin-download-directory', $pluginsDir)
             $warPath = Join-Path $installDir 'jenkins.war'
             if (Test-Path -LiteralPath $warPath) { $cliArgs += @('--war', $warPath) }
             Write-Host "[boxstrapper] Installing $($pluginLines.Count) plugin(s) from $PluginsFile..." -ForegroundColor Cyan
