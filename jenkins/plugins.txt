@@ -1,8 +1,3 @@
-# Jenkins plugins pre-installed by Jenkins-Setup.ps1 via jenkins-plugin-cli.
-#
-# Format: one plugin per line, "id" (latest) or "id:version" (pinned). '#' lines are comments.
-# Dependencies are resolved automatically -- list only the plugins you actually want.
-#
 # IMPORTANT: when JENKINS_ADMIN_PASSWORD is set, the setup wizard is SKIPPED, so its
 # "install suggested plugins" step never runs -- THIS file is the only source of plugins.
 # List everything you need (a bare Jenkins has almost none).
@@ -10,11 +5,20 @@
 # Reproducibility: pin versions (id:version) if you want re-runs months apart to be identical;
 # unpinned ids track the update centre's latest. Edit + re-run Update-Box.ps1 to apply (the install
 # only runs when this file's contents change).
-
-# --- a small, generally-useful baseline; trim or extend to taste ---
 git
-workflow-aggregator
-credentials-binding
-ssh-credentials
+build-failure-analyzer
+build-name-setter
+build-timeout
+credentials
+dark-theme
+cloudbees-folder
+junit
+nunit
+throttle-concurrents
 timestamper
-ws-cleanup
+text-finder
+
+# pipeline
+workflow-aggregator
+pipeline-graph-view
+pipeline-utility-steps
