@@ -21,12 +21,18 @@
     root while ROOT_URL makes it emit /git-prefixed links). Off the tailnet (sandbox / no auth key) all
     of that is skipped and Gitea just stays loopback-only.
 
-    RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them, same as it does to
-    Gitea-Backup-Setup.ps1), this configures the service but does NOT start it, calls the internal
-    Restore-Gitea.ps1 worker while it's stopped, then starts the service exactly once. So a rebuilt box
-    that has an offsite backup comes up directly on the restored data instead of being started empty by
-    setup and then bounced by a separate restore. A no-op unless the box has no data yet AND a snapshot
-    exists; an unconfigured/sandbox box just starts to the web installer as before.
+    RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them from secrets.ini), this
+    configures the service but does NOT start it, calls the internal Restore-Gitea.ps1 worker while it's
+    stopped, then starts the service exactly once. So a rebuilt box that has an offsite backup comes up
+    directly on the restored data instead of being started empty by setup and then bounced by a separate
+    restore. A no-op unless the box has no data yet AND a snapshot exists; an unconfigured/sandbox box
+    just starts to the web installer as before.
+
+    BACKUP: this script also OWNS Gitea's offsite backup (the self-contained-element convention, like the
+    heartbeat): when the R2/restic creds are supplied it registers the daily gitea-dump->restic->R2 task
+    via Gitea-Backup-Setup.ps1 (handing it the -SecretsFile path the SYSTEM task re-reads at run time). So
+    commenting out Gitea's one Update-Box.ps1 call drops the service, its monitoring, its restore, AND its
+    backup together. Skips when the creds are blank.
 #>
 
 [CmdletBinding()]
@@ -42,9 +48,10 @@ param(
     # Tailnet sub-path Gitea is published under -- both the `tailscale serve` mount AND the sub-path
     # baked into ROOT_URL (https://<host><Prefix>/). '' = published at the tailnet root.
     [string]$Prefix = '/git',
-    # R2 + restic credentials for the optional pre-start restore (forwarded to the Restore-Gitea.ps1
-    # worker). Update-Box.ps1 passes these from secrets.ini, same as it does to Gitea-Backup-Setup.ps1.
-    # Blank => no restore (e.g. local sandbox testing); the box just starts to the web installer.
+    # R2 + restic credentials. Power TWO self-contained sub-features this script OWNS: the optional
+    # pre-start RESTORE (forwarded to Restore-Gitea.ps1) and the daily restic->R2 BACKUP task (the
+    # Gitea-Backup-Setup call near the end). Update-Box.ps1 passes these from secrets.ini.
+    # Blank => no restore AND no backup (e.g. local sandbox); the box just starts to the web installer.
     [string]$R2AccountId    = '',
     [string]$R2Bucket       = '',
     [string]$R2AccessKeyId  = '',
@@ -53,7 +60,11 @@ param(
     # Healthchecks.io ping URL for THIS service's heartbeat (Update-Box.ps1 passes HC_GITEA_PING_URL
     # from secrets.ini). Blank => no heartbeat (non-fatal). Owned here so disabling Gitea -- commenting
     # its one Update-Box call -- also drops its monitoring (the self-contained-element convention).
-    [string]$HeartbeatPingUrl = ''
+    [string]$HeartbeatPingUrl = '',
+    # Absolute path to secrets.ini, forwarded to the Gitea backup setup so its daily SYSTEM task can
+    # re-read secrets at run time (a task argument can't carry secrets safely). Blank => the backup setup
+    # falls back to the repo-root secrets.ini next to this gitea\ folder.
+    [string]$SecretsFile      = ''
 )
 
 Set-StrictMode -Version Latest
@@ -353,4 +364,23 @@ try {
     & (Join-Path $PSScriptRoot '..\Healthchecks-Setup.ps1') -PingUrl $HeartbeatPingUrl
 } catch {
     Write-Warning "Gitea heartbeat setup failed: $($_.Exception.Message) (monitoring only; the service is unaffected)."
+}
+
+# --- register Gitea's own offsite backup (this element owns its backup too) ---------------------
+# Gitea-Backup-Setup.ps1 (next to this script) registers a daily SYSTEM task: gitea dump -> restic -> R2
+# (see its header). Owned HERE, not as a standalone Update-Box section, so commenting out Gitea's single
+# Update-Box call also drops its backup (the self-contained-element convention, like the heartbeat above
+# and the restore block). It skips itself when the R2/restic creds are blank. Best-effort: a backup-SETUP
+# hiccup (e.g. a bad R2 cred failing `restic init`) must not wedge the service or the rest of the
+# bootstrap, so swallow errors here -- the daily worker is itself monitored via HC_GITEA_BACKUP_PING_URL.
+try {
+    & (Join-Path $PSScriptRoot 'Gitea-Backup-Setup.ps1') `
+        -SecretsFile    $SecretsFile `
+        -R2AccountId    $R2AccountId `
+        -R2Bucket       $R2Bucket `
+        -R2AccessKeyId  $R2AccessKeyId `
+        -R2SecretKey    $R2SecretKey `
+        -ResticPassword $ResticPassword
+} catch {
+    Write-Warning "Gitea backup setup failed: $($_.Exception.Message) (backups only; the service is unaffected)."
 }

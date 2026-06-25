@@ -136,18 +136,21 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 #        name for its ROOT_URL). Skips (box stays local) if no auth key.
 & (Join-Path $PSScriptRoot 'Tailscale-Setup.ps1') -AuthKey $secrets['TS_AUTHKEY']
 
-# --- 4. Gitea service (nssm-supervised; restores the latest offsite backup on an empty box, then ---
-#        sets its own ROOT_URL from the tailnet name, publishes itself at /git, and registers its own
-#        Healthchecks heartbeat -- see Gitea-Setup.ps1). The R2/restic creds are the same ones passed to
-#        the backup setup in section 7. We only PARSE the secrets here and hand them in as params
-#        (HC_GITEA_PING_URL -> -HeartbeatPingUrl); the script itself never reads secrets.ini.
+# --- 4. Gitea service (nssm-supervised; Gitea-Setup.ps1 configures the service and ALSO owns -- as ---
+#        self-contained sub-features, so this ONE call toggles them all -- its ROOT_URL/tailnet publish at
+#        /git, its Healthchecks heartbeat, an auto-RESTORE of the latest offsite backup onto an empty box
+#        before first start, AND the daily gitea-dump->restic->R2 BACKUP task (it calls Gitea-Backup-Setup
+#        itself, the way it calls Healthchecks-Setup). We only PARSE the secrets here and hand them in as
+#        params (HC_GITEA_PING_URL -> -HeartbeatPingUrl); the R2/restic creds + the secrets.ini PATH feed
+#        both the restore and the backup. The script itself never reads secrets.ini. ---
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
     -R2AccountId      $secrets['R2_ACCOUNT_ID'] `
     -R2Bucket         $secrets['R2_BUCKET'] `
     -R2AccessKeyId    $secrets['R2_ACCESS_KEY_ID'] `
     -R2SecretKey      $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword   $secrets['RESTIC_PASSWORD'] `
-    -HeartbeatPingUrl $secrets['HC_GITEA_PING_URL']
+    -HeartbeatPingUrl $secrets['HC_GITEA_PING_URL'] `
+    -SecretsFile      $secretsFile
 
 # --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
 #        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, pre-installs jenkins\plugins.txt,
@@ -171,16 +174,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
-# --- 7. Gitea offsite backup (gitea dump -> restic -> Cloudflare R2; skips if unconfigured) ---
-& (Join-Path $PSScriptRoot 'gitea\Gitea-Backup-Setup.ps1') `
-    -SecretsFile    $secretsFile `
-    -R2AccountId    $secrets['R2_ACCOUNT_ID'] `
-    -R2Bucket       $secrets['R2_BUCKET'] `
-    -R2AccessKeyId  $secrets['R2_ACCESS_KEY_ID'] `
-    -R2SecretKey    $secrets['R2_SECRET_ACCESS_KEY'] `
-    -ResticPassword $secrets['RESTIC_PASSWORD']
-
-# --- 8. other idempotent setup steps go here -------------------------------
+# --- 7. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
