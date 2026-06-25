@@ -151,13 +151,22 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 
 # --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
 #        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, pre-installs jenkins\plugins.txt,
-#        seeds an admin user (skipping the setup wizard), publishes it on the tailnet, and registers its
-#        own Healthchecks heartbeat). We only PARSE the secrets here and hand them in as params; a blank
-#        JENKINS_ADMIN_PASSWORD keeps the interactive wizard. HC_JENKINS_PING_URL -> -HeartbeatPingUrl. ---
+#        and seeds an admin user (skipping the setup wizard). Jenkins-Setup ALSO owns -- as self-contained
+#        sub-features, so this ONE call toggles them all -- its tailnet publish, its Healthchecks heartbeat,
+#        an auto-RESTORE of the latest offsite snapshot onto a fresh box before first start, AND the weekly
+#        restic->R2 BACKUP task (it calls Jenkins-Backup-Setup itself, the way it calls Healthchecks-Setup).
+#        We only PARSE the secrets here and hand them in as params; a blank JENKINS_ADMIN_PASSWORD keeps the
+#        interactive wizard. The R2/restic creds + the secrets.ini PATH feed both the restore and backup. ---
 & (Join-Path $PSScriptRoot 'jenkins\Jenkins-Setup.ps1') `
     -AdminUser        $secrets['JENKINS_ADMIN_USER'] `
     -AdminPassword    $secrets['JENKINS_ADMIN_PASSWORD'] `
-    -HeartbeatPingUrl $secrets['HC_JENKINS_PING_URL']
+    -HeartbeatPingUrl $secrets['HC_JENKINS_PING_URL'] `
+    -SecretsFile      $secretsFile `
+    -R2AccountId      $secrets['R2_ACCOUNT_ID'] `
+    -R2Bucket         $secrets['R2_BUCKET'] `
+    -R2AccessKeyId    $secrets['R2_ACCESS_KEY_ID'] `
+    -R2SecretKey      $secrets['R2_SECRET_ACCESS_KEY'] `
+    -ResticPassword   $secrets['RESTIC_PASSWORD']
 
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']

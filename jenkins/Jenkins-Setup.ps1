@@ -34,6 +34,12 @@
          re-running). If -AdminPassword is BLANK we leave the interactive wizard enabled (removing the
          flag, the env vars, and the hook) and print initialAdminPassword as before, so a throwaway box
          still provisions.
+      5. OFFSITE BACKUP/RESTORE -- when R2/restic creds are supplied, this script also OWNS Jenkins'
+         offsite backup lifecycle (the self-contained-element convention, like the heartbeat below):
+         before first start it auto-restores the latest snapshot onto a fresh box (Restore-Jenkins.ps1),
+         and it registers the weekly restic->R2 backup task (Jenkins-Backup-Setup.ps1). Both skip when the
+         creds are blank. So commenting out Jenkins' one Update-Box.ps1 call drops the service, its
+         monitoring, AND its backup together -- they live and die with this script.
 
     JAVA: the jenkins package does NOT bundle a JDK and aborts its install without one, so
     packages.config ships temurin21 and Update-Box.ps1 installs it (and refreshes JAVA_HOME onto the
@@ -66,7 +72,20 @@ param(
     [string]$PluginsFile = (Join-Path $PSScriptRoot 'plugins.txt'),
     # Pinned plugin-installation-manager-tool release used to fetch/resolve the plugins. Bump as needed;
     # a download failure is non-fatal (it just warns and skips plugin install this run).
-    [string]$PluginCliVersion = '2.15.0'
+    [string]$PluginCliVersion = '2.15.0',
+    # Absolute path to secrets.ini, forwarded to the Jenkins backup setup so its weekly SYSTEM task can
+    # re-read secrets at run time (a task argument can't carry secrets safely). Blank => the backup setup
+    # falls back to the repo-root secrets.ini next to this jenkins\ folder.
+    [string]$SecretsFile    = '',
+    # R2 + restic credentials. Power TWO self-contained sub-features this script OWNS: auto-RESTORING the
+    # latest offsite snapshot onto a FRESH box (the restore block below) and registering the weekly
+    # restic->R2 BACKUP task (the Jenkins-Backup-Setup call near the end). Update-Box.ps1 passes the same
+    # five values to both. Blank => no restore AND no backup (the box provisions / comes up on the wizard).
+    [string]$R2AccountId    = '',
+    [string]$R2Bucket       = '',
+    [string]$R2AccessKeyId  = '',
+    [string]$R2SecretKey    = '',
+    [string]$ResticPassword = ''
 )
 
 Set-StrictMode -Version Latest
@@ -258,6 +277,35 @@ try {
 if ($jenkinsHome) { $jenkinsHome = $jenkinsHome.Replace('%BASE%', $installDir) }
 else              { $jenkinsHome = Join-Path $installDir '.jenkins' }
 Write-Host "[boxstrapper] JENKINS_HOME: $jenkinsHome" -ForegroundColor DarkGray
+
+# --- restore the latest offsite backup onto a FRESH box (before we touch config or start) ----------
+# Mirrors how Gitea-Setup runs Restore-Gitea, but with a Jenkins twist: the 'jenkins' choco package
+# AUTO-STARTED a default Jenkins before we got here, so we stop it, let the internal Restore-Jenkins.ps1
+# worker lay down the last 'jenkins'-tagged snapshot IF this box looks fresh, then leave it stopped --
+# the apply block at the bottom starts Jenkins exactly once on the restored data (no start-then-bounce).
+# The worker no-ops when there's no snapshot or the box already has jobs / a restore marker, so a
+# re-bootstrap never clobbers live data. All best-effort: a restore hiccup just warns and the box comes
+# up empty / on the wizard. Guarded by a non-blank R2 account id (blank => backups unconfigured).
+if ($R2AccountId) {
+    try {
+        $jsvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($jsvc -and $jsvc.Status -eq 'Running') {
+            Write-Host "[boxstrapper] Stopping '$ServiceName' to check for an offsite backup to restore..." -ForegroundColor Cyan
+            Stop-Service -Name $ServiceName -Force
+            Start-Sleep -Seconds 2          # let WinSW release file handles before we overwrite the tree
+        }
+        & (Join-Path $PSScriptRoot 'Restore-Jenkins.ps1') `
+            -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
+            -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword `
+            -ServiceName $ServiceName -JenkinsHome $jenkinsHome
+    } catch {
+        Write-Host "[boxstrapper] Auto-restore skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
+    } finally {
+        # Don't leave restic/R2 secrets in this provisioning shell's env (the inline worker set them).
+        Remove-Item Env:RESTIC_REPOSITORY, Env:RESTIC_PASSWORD, Env:AWS_ACCESS_KEY_ID, `
+                    Env:AWS_SECRET_ACCESS_KEY, Env:AWS_DEFAULT_REGION -ErrorAction SilentlyContinue
+    }
+}
 
 # --- rewrite jenkins.xml: <arguments> (bind/port/prefix + wizard skip) and <env> (admin creds) -----
 # Edit the raw text rather than reserialising the whole XML, so we touch nothing else WinSW relies on.
@@ -492,4 +540,25 @@ try {
 } catch {
     Write-Warning "Jenkins heartbeat setup failed: $($_.Exception.Message) (monitoring only; the service is unaffected)."
 }
+
+# --- register Jenkins' own weekly offsite backup (this element owns its backup too) ----------------
+# Jenkins-Backup-Setup.ps1 (next to this script) registers a weekly SYSTEM task that snapshots
+# JENKINS_HOME to R2 via restic -- see its header. Owned HERE, not as a standalone Update-Box section, so
+# commenting out Jenkins' single Update-Box call also drops its backup (the self-contained-element
+# convention, like the heartbeat above and the restore block). It skips itself when the R2/restic creds
+# are blank. Best-effort: a backup-SETUP hiccup (e.g. a bad R2 cred failing `restic init`) must not wedge
+# the service or the rest of the bootstrap, so swallow errors here -- the weekly worker is itself
+# monitored via HC_JENKINS_BACKUP_PING_URL.
+try {
+    & (Join-Path $PSScriptRoot 'Jenkins-Backup-Setup.ps1') `
+        -SecretsFile    $SecretsFile `
+        -R2AccountId    $R2AccountId `
+        -R2Bucket       $R2Bucket `
+        -R2AccessKeyId  $R2AccessKeyId `
+        -R2SecretKey    $R2SecretKey `
+        -ResticPassword $ResticPassword
+} catch {
+    Write-Warning "Jenkins backup setup failed: $($_.Exception.Message) (backups only; the service is unaffected)."
+}
+
 Write-Host "[boxstrapper] Finish setup at the tailnet URL under '$Prefix' (run 'tailscale serve status' for it)." -ForegroundColor DarkGray
