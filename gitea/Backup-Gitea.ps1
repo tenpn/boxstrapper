@@ -28,7 +28,7 @@
     creds file was deliberately rejected: secrets.ini already sits in plaintext on the box, so an ACL'd
     copy adds a file to keep in sync without any real protection. Keys read here:
       R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, RESTIC_PASSWORD
-      HC_BACKUP_PING_URL (optional -- a SEPARATE Healthchecks check from the box heartbeat)
+      HC_GITEA_BACKUP_PING_URL (optional -- a SEPARATE Healthchecks check from the box heartbeat)
     Blank R2/restic creds => pings /fail (if a URL is set) and exits; never throws.
 
     A backup must never wedge the box, so every stage is wrapped and any failure is reported to
@@ -124,7 +124,7 @@ if (-not (Test-Path -LiteralPath $SecretsFile)) {
     return
 }
 $secrets = Read-Secrets -Path $SecretsFile
-$pingUrl = ([string]$secrets['HC_BACKUP_PING_URL']).TrimEnd('/')
+$pingUrl = ([string]$secrets['HC_GITEA_BACKUP_PING_URL']).TrimEnd('/')
 
 $ok     = $false
 $detail = ''
@@ -235,5 +235,5 @@ if ($pingUrl) {
         Write-Warning "[boxstrapper] Healthchecks ping to $target failed: $($_.Exception.Message)"
     }
 } else {
-    Write-Host "[boxstrapper] No HC_BACKUP_PING_URL set; skipped status ping." -ForegroundColor DarkGray
+    Write-Host "[boxstrapper] No HC_GITEA_BACKUP_PING_URL set; skipped status ping." -ForegroundColor DarkGray
 }
