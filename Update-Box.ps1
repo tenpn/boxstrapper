@@ -139,8 +139,8 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 # --- 4. Gitea service (nssm-supervised; Gitea-Setup.ps1 configures the service and ALSO owns -- as ---
 #        self-contained sub-features, so this ONE call toggles them all -- its ROOT_URL/tailnet publish at
 #        /git, its Healthchecks heartbeat, an auto-RESTORE of the latest offsite backup onto an empty box
-#        before first start, AND the daily gitea-dump->restic->R2 BACKUP task (it calls Gitea-Backup-Setup
-#        itself, the way it calls Healthchecks-Setup). We only PARSE the secrets here and hand them in as
+#        before first start, AND the daily gitea-dump->restic->R2 BACKUP task (it calls the shared
+#        Register-ResticBackup.ps1 itself, the way it calls Healthchecks-Setup). We only PARSE the secrets here and hand them in as
 #        params (HC_GITEA_PING_URL -> -HeartbeatPingUrl); the R2/restic creds + the secrets.ini PATH feed
 #        both the restore and the backup. The script itself never reads secrets.ini. ---
 & (Join-Path $PSScriptRoot 'gitea\Gitea-Setup.ps1') `
@@ -157,7 +157,7 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 #        and seeds an admin user (skipping the setup wizard). Jenkins-Setup ALSO owns -- as self-contained
 #        sub-features, so this ONE call toggles them all -- its tailnet publish, its Healthchecks heartbeat,
 #        an auto-RESTORE of the latest offsite snapshot onto a fresh box before first start, AND the weekly
-#        restic->R2 BACKUP task (it calls Jenkins-Backup-Setup itself, the way it calls Healthchecks-Setup).
+#        restic->R2 BACKUP task (it calls the shared Register-ResticBackup.ps1 itself, like Healthchecks-Setup).
 #        We only PARSE the secrets here and hand them in as params; a blank JENKINS_ADMIN_PASSWORD keeps the
 #        interactive wizard. The R2/restic creds + the secrets.ini PATH feed both the restore and backup. ---
 & (Join-Path $PSScriptRoot 'jenkins\Jenkins-Setup.ps1') `

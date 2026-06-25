@@ -3,7 +3,7 @@
 .SYNOPSIS
     Snapshot JENKINS_HOME to Cloudflare R2 via restic. Best-effort, monitored.
 .DESCRIPTION
-    Run on a WEEKLY schedule (as SYSTEM) by the task that Jenkins-Backup-Setup.ps1 registers. Pipeline:
+    Run on a WEEKLY schedule (as SYSTEM) by the task that the shared Register-ResticBackup.ps1 registers. Pipeline:
       1. stop the 'Jenkins' service  -> a consistent read (a running Jenkins holds Windows file handles,
                                         so restic would fail/skip locked files); restarted in a finally.
       2. restic backup <JENKINS_HOME> -> Cloudflare R2, client-side encrypted BEFORE upload, tagged
@@ -83,36 +83,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Read-Secrets {
-    # Same parse as Update-Box.ps1: value = everything after the first '=' (so base64 tokens ending
-    # in '==' survive); '#' comments and blank lines are ignored. This worker re-reads the single
-    # source because a detached SYSTEM task can't be handed secrets as params safely (see header).
-    param([Parameter(Mandatory)][string]$Path)
-    $secrets = @{}
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $t = $line.Trim()
-        if (-not $t -or $t.StartsWith('#')) { continue }
-        $i = $t.IndexOf('=')
-        if ($i -lt 1) { continue }
-        $secrets[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
-    }
-    return $secrets
-}
-
-function Invoke-Native {
-    # Run a native exe, capturing combined stdout+stderr without letting native stderr trip
-    # $ErrorActionPreference='Stop' (a real PS 5.1 gotcha). Caller checks .Code.
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $out = & $Exe @Arguments 2>&1 | Out-String
-    } finally {
-        $ErrorActionPreference = $prev
-    }
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
-}
+# Shared restic/secrets/ping plumbing: Read-Secrets, Invoke-Native, Set-ResticEnv, Send-BackupPing.
+# (A detached SYSTEM task can still dot-source this: $PSScriptRoot is this jenkins\ dir at run time, and
+# the worker + Backup-Common.ps1 move together with the repo -- see Backup-Common.ps1's header.)
+. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')
 
 function Resolve-JenkinsHome {
     # Mirror Jenkins-Setup.ps1: installDir from the service's PathName (jenkins.exe), JENKINS_HOME from
@@ -163,12 +137,9 @@ try {
         throw 'R2 credentials or RESTIC_PASSWORD missing in secrets.ini; backup is not configured.'
     }
 
-    # restic reads these from the environment; process-scoped only, never persisted.
-    $env:RESTIC_REPOSITORY     = "s3:https://$r2Account.r2.cloudflarestorage.com/$r2Bucket"
-    $env:RESTIC_PASSWORD       = $resticPw
-    $env:AWS_ACCESS_KEY_ID     = $r2Key
-    $env:AWS_SECRET_ACCESS_KEY = $r2Secret
-    $env:AWS_DEFAULT_REGION    = 'auto'
+    # restic reads the repo + creds from the environment; process-scoped only, never persisted.
+    Set-ResticEnv -R2AccountId $r2Account -R2Bucket $r2Bucket -R2AccessKeyId $r2Key `
+                  -R2SecretKey $r2Secret -ResticPassword $resticPw
 
     # --- locate tools + JENKINS_HOME ---------------------------------------
     $resticCmd = Get-Command restic -ErrorAction SilentlyContinue
@@ -236,17 +207,4 @@ try {
 }
 
 # --- report to Healthchecks (best-effort; a monitoring failure must not throw) ---
-if ($pingUrl) {
-    $target = $pingUrl
-    if (-not $ok) { $target = "$pingUrl/fail" }
-    $body = $detail
-    if ($body.Length -gt 1000) { $body = $body.Substring(0, 1000) }
-    try {
-        Invoke-RestMethod -Uri $target -Method Post -Body $body -TimeoutSec $TimeoutSec | Out-Null
-        Write-Host "[boxstrapper] Backup status pinged: $target"
-    } catch {
-        Write-Warning "[boxstrapper] Healthchecks ping to $target failed: $($_.Exception.Message)"
-    }
-} else {
-    Write-Host "[boxstrapper] No HC_JENKINS_BACKUP_PING_URL set; skipped status ping." -ForegroundColor DarkGray
-}
+Send-BackupPing -PingUrl $pingUrl -Ok $ok -Detail $detail -TimeoutSec $TimeoutSec

@@ -30,7 +30,7 @@
 
     BACKUP: this script also OWNS Gitea's offsite backup (the self-contained-element convention, like the
     heartbeat): when the R2/restic creds are supplied it registers the daily gitea-dump->restic->R2 task
-    via Gitea-Backup-Setup.ps1 (handing it the -SecretsFile path the SYSTEM task re-reads at run time). So
+    via the shared Register-ResticBackup.ps1 (handing it the -SecretsFile path the SYSTEM task re-reads). So
     commenting out Gitea's one Update-Box.ps1 call drops the service, its monitoring, its restore, AND its
     backup together. Skips when the creds are blank.
 #>
@@ -50,7 +50,7 @@ param(
     [string]$Prefix = '/git',
     # R2 + restic credentials. Power TWO self-contained sub-features this script OWNS: the optional
     # pre-start RESTORE (forwarded to Restore-Gitea.ps1) and the daily restic->R2 BACKUP task (the
-    # Gitea-Backup-Setup call near the end). Update-Box.ps1 passes these from secrets.ini.
+    # Register-ResticBackup call near the end). Update-Box.ps1 passes these from secrets.ini.
     # Blank => no restore AND no backup (e.g. local sandbox); the box just starts to the web installer.
     [string]$R2AccountId    = '',
     [string]$R2Bucket       = '',
@@ -367,14 +367,19 @@ try {
 }
 
 # --- register Gitea's own offsite backup (this element owns its backup too) ---------------------
-# Gitea-Backup-Setup.ps1 (next to this script) registers a daily SYSTEM task: gitea dump -> restic -> R2
-# (see its header). Owned HERE, not as a standalone Update-Box section, so commenting out Gitea's single
-# Update-Box call also drops its backup (the self-contained-element convention, like the heartbeat above
-# and the restore block). It skips itself when the R2/restic creds are blank. Best-effort: a backup-SETUP
-# hiccup (e.g. a bad R2 cred failing `restic init`) must not wedge the service or the rest of the
-# bootstrap, so swallow errors here -- the daily worker is itself monitored via HC_GITEA_BACKUP_PING_URL.
+# The shared Register-ResticBackup.ps1 (repo root) registers a daily SYSTEM task running Backup-Gitea.ps1
+# (gitea dump -> restic -> R2; see those headers). It's the SAME registrar Jenkins-Setup uses -- the way
+# both services call Healthchecks-Setup for their heartbeat. Owned HERE, not as a standalone Update-Box
+# section, so commenting out Gitea's single Update-Box call also drops its backup (the self-contained-
+# element convention, like the heartbeat above and the restore block). It skips itself when the R2/restic
+# creds are blank. Best-effort: a backup-SETUP hiccup (e.g. a bad R2 cred failing `restic init`) must not
+# wedge the service or the bootstrap, so swallow errors -- the worker is monitored via HC_GITEA_BACKUP_PING_URL.
 try {
-    & (Join-Path $PSScriptRoot 'Gitea-Backup-Setup.ps1') `
+    & (Join-Path $PSScriptRoot '..\Register-ResticBackup.ps1') `
+        -TaskName       'boxstrapper-gitea-backup' `
+        -Worker         (Join-Path $PSScriptRoot 'Backup-Gitea.ps1') `
+        -Schedule       'Daily' `
+        -RunAt          '03:00' `
         -SecretsFile    $SecretsFile `
         -R2AccountId    $R2AccountId `
         -R2Bucket       $R2Bucket `

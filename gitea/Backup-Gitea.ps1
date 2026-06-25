@@ -3,7 +3,7 @@
 .SYNOPSIS
     Dump Gitea and push an encrypted snapshot to Cloudflare R2 via restic. Best-effort, monitored.
 .DESCRIPTION
-    Run on a daily schedule (as SYSTEM) by the task that Gitea-Backup-Setup.ps1 registers. Pipeline:
+    Run on a daily schedule (as SYSTEM) by the task that the shared Register-ResticBackup.ps1 registers. Pipeline:
       1. gitea dump            -> one consistent .zip (repos + SQLite DB + config + LFS + attachments).
                                   The 'gitea' service is STOPPED for the dump and restarted right after
                                   (see SERVICE below); only this step needs it down.
@@ -86,22 +86,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Read-Secrets {
-    # Same parse as Update-Box.ps1: value = everything after the first '=' (so base64 tokens ending
-    # in '==' survive); '#' comments and blank lines are ignored. This worker re-reads the single
-    # source because a detached SYSTEM task can't be handed secrets as params safely (see header).
-    param([Parameter(Mandatory)][string]$Path)
-    $secrets = @{}
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $t = $line.Trim()
-        if (-not $t -or $t.StartsWith('#')) { continue }
-        $i = $t.IndexOf('=')
-        if ($i -lt 1) { continue }
-        $secrets[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
-    }
-    return $secrets
-}
+# Shared restic/secrets/ping plumbing: Read-Secrets, Invoke-Native, Set-ResticEnv, Send-BackupPing.
+# (A detached SYSTEM task can still dot-source this: $PSScriptRoot is this gitea\ dir at run time, and
+# the worker + Backup-Common.ps1 move together with the repo -- see Backup-Common.ps1's header.)
+. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')
 
 function Resolve-GiteaExe {
     # Point at the REAL gitea.exe, never the choco 'bin' shim (mirrors Gitea-Setup.ps1).
@@ -117,20 +105,6 @@ function Resolve-GiteaExe {
     $cmd = Get-Command gitea -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     throw "Could not locate gitea.exe. Is the 'gitea' choco package installed?"
-}
-
-function Invoke-Native {
-    # Run a native exe, capturing combined stdout+stderr without letting native stderr trip
-    # $ErrorActionPreference='Stop' (a real PS 5.1 gotcha). Caller checks .Code.
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $out = & $Exe @Arguments 2>&1 | Out-String
-    } finally {
-        $ErrorActionPreference = $prev
-    }
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
 }
 
 # --- read secrets directly (the SYSTEM task can't be handed them as params) --
@@ -155,12 +129,9 @@ try {
         throw 'R2 credentials or RESTIC_PASSWORD missing in secrets.ini; backup is not configured.'
     }
 
-    # restic reads these from the environment; process-scoped only, never persisted.
-    $env:RESTIC_REPOSITORY     = "s3:https://$r2Account.r2.cloudflarestorage.com/$r2Bucket"
-    $env:RESTIC_PASSWORD       = $resticPw
-    $env:AWS_ACCESS_KEY_ID     = $r2Key
-    $env:AWS_SECRET_ACCESS_KEY = $r2Secret
-    $env:AWS_DEFAULT_REGION    = 'auto'
+    # restic reads the repo + creds from the environment; process-scoped only, never persisted.
+    Set-ResticEnv -R2AccountId $r2Account -R2Bucket $r2Bucket -R2AccessKeyId $r2Key `
+                  -R2SecretKey $r2Secret -ResticPassword $resticPw
 
     # --- locate tools -------------------------------------------------------
     $resticCmd = Get-Command restic -ErrorAction SilentlyContinue
@@ -248,17 +219,4 @@ try {
 }
 
 # --- report to Healthchecks (best-effort; a monitoring failure must not throw) ---
-if ($pingUrl) {
-    $target = $pingUrl
-    if (-not $ok) { $target = "$pingUrl/fail" }
-    $body = $detail
-    if ($body.Length -gt 1000) { $body = $body.Substring(0, 1000) }
-    try {
-        Invoke-RestMethod -Uri $target -Method Post -Body $body -TimeoutSec $TimeoutSec | Out-Null
-        Write-Host "[boxstrapper] Backup status pinged: $target"
-    } catch {
-        Write-Warning "[boxstrapper] Healthchecks ping to $target failed: $($_.Exception.Message)"
-    }
-} else {
-    Write-Host "[boxstrapper] No HC_GITEA_BACKUP_PING_URL set; skipped status ping." -ForegroundColor DarkGray
-}
+Send-BackupPing -PingUrl $pingUrl -Ok $ok -Detail $detail -TimeoutSec $TimeoutSec

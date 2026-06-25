@@ -57,20 +57,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Invoke-Native {
-    # Run a native exe, capturing combined stdout+stderr without letting native stderr trip
-    # $ErrorActionPreference='Stop' (a real PS 5.1 gotcha). Caller checks .Code.
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $out = & $Exe @Arguments 2>&1 | Out-String
-    } finally {
-        $ErrorActionPreference = $prev
-    }
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
-}
+# Shared restic/secrets plumbing: Invoke-Native, Set-ResticEnv.
+. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')
 
 function Resolve-JenkinsPaths {
     # Mirror Jenkins-Setup.ps1: installDir from the service's PathName (jenkins.exe), JENKINS_HOME from
@@ -105,13 +93,10 @@ if (-not $R2AccountId -or -not $R2Bucket -or -not $R2AccessKeyId -or -not $R2Sec
     return
 }
 
-# restic reads these from the environment; process-scoped only. The inline caller (Jenkins-Setup.ps1)
-# clears them from its env after we return.
-$env:RESTIC_REPOSITORY     = "s3:https://$R2AccountId.r2.cloudflarestorage.com/$R2Bucket"
-$env:RESTIC_PASSWORD       = $ResticPassword
-$env:AWS_ACCESS_KEY_ID     = $R2AccessKeyId
-$env:AWS_SECRET_ACCESS_KEY = $R2SecretKey
-$env:AWS_DEFAULT_REGION    = 'auto'
+# restic reads the repo + creds from the environment; process-scoped only. The inline caller
+# (Jenkins-Setup.ps1) clears them from its env after we return.
+Set-ResticEnv -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
+              -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword
 
 # --- locate tools + JENKINS_HOME -------------------------------------------
 $resticCmd = Get-Command restic -ErrorAction SilentlyContinue

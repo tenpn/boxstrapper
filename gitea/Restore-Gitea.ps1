@@ -27,7 +27,7 @@
     hardcodes C:\gitea), so the DB PATH / repo ROOT inside the restored app.ini already line up.
 
     SECRETS: the R2 keys + restic password arrive as PARAMS. Update-Box.ps1 is the sole secrets.ini
-    parser and passes them down via Gitea-Setup.ps1, exactly like Gitea-Backup-Setup.ps1 -- this script
+    parser and passes them down via Gitea-Setup.ps1, exactly like the shared Register-ResticBackup.ps1 -- this script
     never reads secrets.ini itself (unlike the SYSTEM-task backup worker, which must self-read because a
     task argument can't carry secrets safely). Blank creds => nothing to restore from, exit cleanly.
 
@@ -54,24 +54,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
-function Invoke-Native {
-    # Run a native exe, capturing combined stdout+stderr without letting native stderr trip
-    # $ErrorActionPreference='Stop'. Optionally feed a file to stdin (for sqlite3 < dump.sql).
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @(), [string]$StdinFile)
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        if ($StdinFile) {
-            $out = Get-Content -LiteralPath $StdinFile -Raw | & $Exe @Arguments 2>&1 | Out-String
-        } else {
-            $out = & $Exe @Arguments 2>&1 | Out-String
-        }
-    } finally {
-        $ErrorActionPreference = $prev
-    }
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $out }
-}
+# Shared restic/secrets plumbing: Invoke-Native (with -StdinFile for sqlite3), Set-ResticEnv.
+. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')
 
 function Get-IniValue {
     # Tiny INI reader: value of $Key in section [$Section] ('' = the top, pre-section, block).
@@ -106,13 +90,10 @@ if (-not $R2AccountId -or -not $R2Bucket -or -not $R2AccessKeyId -or -not $R2Sec
     return
 }
 
-# restic reads these from the environment; process-scoped only. The inline caller (Gitea-Setup.ps1)
-# clears them from its env after we return.
-$env:RESTIC_REPOSITORY     = "s3:https://$R2AccountId.r2.cloudflarestorage.com/$R2Bucket"
-$env:RESTIC_PASSWORD       = $ResticPassword
-$env:AWS_ACCESS_KEY_ID     = $R2AccessKeyId
-$env:AWS_SECRET_ACCESS_KEY = $R2SecretKey
-$env:AWS_DEFAULT_REGION    = 'auto'
+# restic reads the repo + creds from the environment; process-scoped only. The inline caller
+# (Gitea-Setup.ps1) clears them from its env after we return.
+Set-ResticEnv -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
+              -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword
 
 # --- locate tools -----------------------------------------------------------
 $resticCmd = Get-Command restic -ErrorAction SilentlyContinue

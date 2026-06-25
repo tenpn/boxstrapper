@@ -37,7 +37,7 @@
       5. OFFSITE BACKUP/RESTORE -- when R2/restic creds are supplied, this script also OWNS Jenkins'
          offsite backup lifecycle (the self-contained-element convention, like the heartbeat below):
          before first start it auto-restores the latest snapshot onto a fresh box (Restore-Jenkins.ps1),
-         and it registers the weekly restic->R2 backup task (Jenkins-Backup-Setup.ps1). Both skip when the
+         and it registers the weekly restic->R2 backup task (via the shared Register-ResticBackup.ps1). Both skip when the
          creds are blank. So commenting out Jenkins' one Update-Box.ps1 call drops the service, its
          monitoring, AND its backup together -- they live and die with this script.
 
@@ -79,7 +79,7 @@ param(
     [string]$SecretsFile    = '',
     # R2 + restic credentials. Power TWO self-contained sub-features this script OWNS: auto-RESTORING the
     # latest offsite snapshot onto a FRESH box (the restore block below) and registering the weekly
-    # restic->R2 BACKUP task (the Jenkins-Backup-Setup call near the end). Update-Box.ps1 passes the same
+    # restic->R2 BACKUP task (the Register-ResticBackup call near the end). Update-Box.ps1 passes the same
     # five values to both. Blank => no restore AND no backup (the box provisions / comes up on the wizard).
     [string]$R2AccountId    = '',
     [string]$R2Bucket       = '',
@@ -542,15 +542,21 @@ try {
 }
 
 # --- register Jenkins' own weekly offsite backup (this element owns its backup too) ----------------
-# Jenkins-Backup-Setup.ps1 (next to this script) registers a weekly SYSTEM task that snapshots
-# JENKINS_HOME to R2 via restic -- see its header. Owned HERE, not as a standalone Update-Box section, so
-# commenting out Jenkins' single Update-Box call also drops its backup (the self-contained-element
-# convention, like the heartbeat above and the restore block). It skips itself when the R2/restic creds
-# are blank. Best-effort: a backup-SETUP hiccup (e.g. a bad R2 cred failing `restic init`) must not wedge
-# the service or the rest of the bootstrap, so swallow errors here -- the weekly worker is itself
-# monitored via HC_JENKINS_BACKUP_PING_URL.
+# The shared Register-ResticBackup.ps1 (repo root) registers a weekly SYSTEM task running Backup-Jenkins.ps1
+# (restic snapshot of JENKINS_HOME -> R2; see those headers). It's the SAME registrar Gitea-Setup uses --
+# the way both services call Healthchecks-Setup for their heartbeat. Owned HERE, not as a standalone
+# Update-Box section, so commenting out Jenkins' single Update-Box call also drops its backup (the
+# self-contained-element convention, like the heartbeat above and the restore block). It skips itself when
+# the R2/restic creds are blank. Best-effort: a backup-SETUP hiccup (e.g. a bad R2 cred failing `restic
+# init`) must not wedge the service or the bootstrap, so swallow errors -- the worker is monitored via
+# HC_JENKINS_BACKUP_PING_URL.
 try {
-    & (Join-Path $PSScriptRoot 'Jenkins-Backup-Setup.ps1') `
+    & (Join-Path $PSScriptRoot '..\Register-ResticBackup.ps1') `
+        -TaskName       'boxstrapper-jenkins-backup' `
+        -Worker         (Join-Path $PSScriptRoot 'Backup-Jenkins.ps1') `
+        -Schedule       'Weekly' `
+        -DayOfWeek      'Sunday' `
+        -RunAt          '03:30' `
         -SecretsFile    $SecretsFile `
         -R2AccountId    $R2AccountId `
         -R2Bucket       $R2Bucket `
