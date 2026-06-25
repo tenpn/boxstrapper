@@ -44,6 +44,9 @@ param(
     [string]$R2SecretKey    = '',
     [string]$ResticPassword = '',
     [string]$WorkDir        = 'C:\gitea',
+    # restic tag that scopes snapshot selection to GITEA's backups -- the repo is shared with Jenkins, so
+    # without this 'latest' could resolve to a Jenkins snapshot. Mirrors Backup-Gitea.ps1's -Tag 'gitea'.
+    [string]$Tag            = 'gitea',
     # 'latest' = restic's most recent snapshot; pass a snapshot id for point-in-time recovery.
     [string]$SnapshotId     = 'latest',
     [string]$RestoreStaging = 'C:\gitea\backup\restore'
@@ -120,8 +123,8 @@ $sqliteCmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
 if (-not $sqliteCmd) { throw "sqlite3 is not on PATH (install the 'sqlite' choco package; it's in packages.config). Needed to rebuild the DB from gitea-db.sql." }
 $sqlite3 = $sqliteCmd.Source
 
-# --- 1. is there anything to restore? --------------------------------------
-$r = Invoke-Native $restic @('snapshots', $SnapshotId, '--json')
+# --- 1. is there anything to restore? (scope to the 'gitea' tag in the shared repo) -----------
+$r = Invoke-Native $restic @('snapshots', $SnapshotId, '--tag', $Tag, '--json')
 if ($r.Code -ne 0) {
     # Repo unreachable / not initialised yet (e.g. a first-ever box). Nothing to restore.
     Write-Host "[boxstrapper] No restic repo to restore from yet; nothing to restore." -ForegroundColor DarkGray
@@ -130,7 +133,7 @@ if ($r.Code -ne 0) {
 $snaps = @()
 try { $snaps = @($r.Output | ConvertFrom-Json) } catch { $snaps = @() }
 if ($snaps.Count -eq 0) {
-    Write-Host "[boxstrapper] No snapshots in the restic repo; nothing to restore." -ForegroundColor DarkGray
+    Write-Host "[boxstrapper] No '$Tag'-tagged snapshots in the restic repo; nothing to restore." -ForegroundColor DarkGray
     return
 }
 
@@ -145,8 +148,8 @@ try {
     # --- 3. restic restore into a clean staging dir -------------------------
     if (Test-Path -LiteralPath $RestoreStaging) { Remove-Item -LiteralPath $RestoreStaging -Recurse -Force }
     New-Item -ItemType Directory -Path $RestoreStaging -Force | Out-Null
-    Write-Host "[boxstrapper] restic restore $SnapshotId -> $RestoreStaging" -ForegroundColor Cyan
-    $r = Invoke-Native $restic @('restore', $SnapshotId, '--target', $RestoreStaging)
+    Write-Host "[boxstrapper] restic restore $SnapshotId (tag $Tag) -> $RestoreStaging" -ForegroundColor Cyan
+    $r = Invoke-Native $restic @('restore', $SnapshotId, '--tag', $Tag, '--target', $RestoreStaging)
     if ($r.Code -ne 0) { throw "restic restore failed (exit $($r.Code)): $($r.Output.Trim())" }
 
     # restic recreates the original (absolute) path under the target, so locate the dump by name.

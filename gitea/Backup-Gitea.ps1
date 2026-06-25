@@ -7,10 +7,22 @@
       1. gitea dump            -> one consistent .zip (repos + SQLite DB + config + LFS + attachments).
                                   The 'gitea' service is STOPPED for the dump and restarted right after
                                   (see SERVICE below); only this step needs it down.
-      2. restic backup <.zip>  -> Cloudflare R2, client-side encrypted BEFORE upload
-      3. restic forget --prune -> GFS retention (keep 7 daily / 4 weekly / 6 monthly)
+      2. restic backup <.zip>  -> Cloudflare R2, client-side encrypted BEFORE upload, tagged 'gitea'
+      3. restic forget --prune -> GFS retention SCOPED to the 'gitea' tag (keep 7 daily / 4 weekly /
+                                  6 monthly) -- see RETENTION below
       4. trim local staging    -> keep only the newest archive (a fast, no-network restore copy)
       5. ping Healthchecks.io  -> success URL on a clean run, <url>/fail (with a log tail) otherwise
+
+    RETENTION -- why the backup/forget are tagged 'gitea' and forget groups by host,tags:
+    Gitea and Jenkins back up to the SAME restic repo, and each dump is gitea-dump-<timestamp>.zip -- a
+    UNIQUE path every run. A plain `restic forget --keep-*` groups by host,paths (its default), so every
+    Gitea snapshot lands in its own one-member group and NOTHING is ever expired (a latent no-op), and it
+    would also evaluate Jenkins' snapshots. So the backup tags snapshots 'gitea' and forget runs
+    `--tag gitea --group-by host,tags`: the tag restricts the candidate set to Gitea's snapshots (Jenkins'
+    are untouched), and grouping by tags collapses all of Gitea's into ONE group so GFS actually expires
+    old ones. (Contrast Backup-Jenkins.ps1, which backs up a STABLE path and so needs only `--tag jenkins`.)
+    NOTE: snapshots taken before this tagging existed are UNtagged, so `forget --tag gitea` won't expire
+    them -- tag or forget those once by hand (`restic tag --add gitea <id>` or `restic forget <id>`).
 
     SERVICE -- why the dump stops Gitea:
     gitea dump packs the whole data dir, and while Gitea runs it holds an exclusive Windows handle on
@@ -46,7 +58,7 @@
            AWS_ACCESS_KEY_ID  = <R2_ACCESS_KEY_ID>
            AWS_SECRET_ACCESS_KEY = <R2_SECRET_ACCESS_KEY>
            AWS_DEFAULT_REGION = auto
-      1. restic snapshots                                   # pick a snapshot id
+      1. restic snapshots --tag gitea                       # pick a snapshot id (Gitea's, not Jenkins')
          restic restore <id> --target C:\restore
       2. Unzip the recovered gitea-dump-*.zip, then follow Gitea's restore steps: stop the service,
          rebuild the DB (sqlite3 gitea.db < gitea-db.sql -- the dump stores SQL text, not a raw .db),
@@ -62,6 +74,9 @@ param(
     [string]$WorkDir     = 'C:\gitea',
     [string]$ServiceName = 'gitea',
     [string]$StagingDir  = 'C:\gitea\backup\staging',
+    # restic tag scoping both backup and forget to Gitea snapshots in the shared (Jenkins) repo (see
+    # RETENTION in the header). Mirrors Backup-Jenkins.ps1's -Tag 'jenkins'.
+    [string]$Tag         = 'gitea',
     [int]   $KeepDaily   = 7,
     [int]   $KeepWeekly  = 4,
     [int]   $KeepMonthly = 6,
@@ -196,14 +211,24 @@ try {
         }
     }
 
-    # --- 2. restic backup (client-side encrypted, uploaded to R2) -----------
-    Write-Host "[boxstrapper] restic backup -> $($env:RESTIC_REPOSITORY)" -ForegroundColor Cyan
-    $r = Invoke-Native $restic @('backup', $dumpFile)
+    # --- 2. restic backup (client-side encrypted, uploaded to R2, tagged) ---
+    Write-Host "[boxstrapper] restic backup --tag $Tag -> $($env:RESTIC_REPOSITORY)" -ForegroundColor Cyan
+    $r = Invoke-Native $restic @('backup', $dumpFile, '--tag', $Tag)
     if ($r.Code -ne 0) { throw "restic backup failed (exit $($r.Code)): $($r.Output.Trim())" }
 
-    # --- 3. retention (GFS) -------------------------------------------------
-    Write-Host "[boxstrapper] restic forget --prune (keep ${KeepDaily}d/${KeepWeekly}w/${KeepMonthly}m)" -ForegroundColor Cyan
-    $r = Invoke-Native $restic @('forget', '--keep-daily', "$KeepDaily", '--keep-weekly', "$KeepWeekly",
+    # --- 3. retention (GFS), SCOPED to this service's tag -------------------
+    # TWO reasons for '--tag $Tag --group-by host,tags' (NOT a plain forget):
+    #   (1) SHARED REPO -- Gitea and Jenkins back up to the same restic repo, so '--tag $Tag' restricts
+    #       the candidate set to Gitea's own snapshots; Jenkins' snapshots are never forgotten/considered.
+    #   (2) TIMESTAMPED PATH -- each dump is gitea-dump-<stamp>.zip, a UNIQUE path per run. restic's
+    #       default '--group-by host,paths' would then put every snapshot in its OWN one-member group, so
+    #       the keep policy would retain ALL of them (the old latent no-op). '--group-by host,tags'
+    #       collapses all $Tag-tagged snapshots into ONE group, so GFS actually expires old ones.
+    # (Backup-Jenkins.ps1 needs only '--tag jenkins' -- it backs up a STABLE path, so default grouping
+    # already collapses its snapshots; only Gitea's per-run path forces the explicit --group-by here.)
+    Write-Host "[boxstrapper] restic forget --tag $Tag --prune (keep ${KeepDaily}d/${KeepWeekly}w/${KeepMonthly}m)" -ForegroundColor Cyan
+    $r = Invoke-Native $restic @('forget', '--tag', $Tag, '--group-by', 'host,tags',
+                                 '--keep-daily', "$KeepDaily", '--keep-weekly', "$KeepWeekly",
                                  '--keep-monthly', "$KeepMonthly", '--prune')
     if ($r.Code -ne 0) { throw "restic forget/prune failed (exit $($r.Code)): $($r.Output.Trim())" }
 
