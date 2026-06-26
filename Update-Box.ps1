@@ -80,7 +80,11 @@ if (-not (Test-Path $secretsFile)) {
     if (-not (Test-Path $exampleFile)) { throw "Neither secrets.ini nor secrets.example found in $PSScriptRoot." }
     Copy-Item -LiteralPath $exampleFile -Destination $secretsFile
     Write-Host    "[boxstrapper] Created $secretsFile from the template." -ForegroundColor Cyan
-    Write-Warning "Fill in your secrets (leave a key blank to skip that feature), then re-run Update-Box.ps1."
+    Write-Warning "Fill in your secrets (leave a key blank to skip that feature):"
+    Write-Host    "[boxstrapper] > edit $secretsFile" -ForegroundColor Cyan
+    Write-Warning "Then run Update-Box.ps1:"
+    $selfPath = Join-Path $PSScriptRoot 'Update-Box.ps1'
+    Write-Host    "[boxstrapper] > $selfPath" -ForegroundColor Cyan
     return
 }
 $secrets = Read-Secrets -Path $secretsFile
