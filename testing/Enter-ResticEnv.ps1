@@ -27,8 +27,23 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$SecretsFile = (Join-Path $PSScriptRoot '..\secrets.ini')
+    [string]$SecretsFile
 )
+
+# Resolve this script's folder to anchor ..\Backup-Common.ps1 / ..\secrets.ini. This MUST be done in
+# the body, not a param default: in some PowerShell versions $PSScriptRoot is EMPTY inside a param()
+# default when the script is dot-sourced (the body still has it), which is the Join-Path binding error
+# that bit us. $PSScriptRoot is also empty when the code is pasted / run via the editor's "Run
+# Selection" -- there $PSCommandPath and MyInvocation.MyCommand.Path are empty too, so we can't anchor
+# and must tell the user to dot-source the FILE. Fall back through all three before giving up.
+$scriptDir = $PSScriptRoot
+if (-not $scriptDir -and $PSCommandPath)               { $scriptDir = Split-Path -Parent $PSCommandPath }
+if (-not $scriptDir -and $MyInvocation.MyCommand.Path) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $scriptDir) {
+    Write-Warning "Run this by DOT-SOURCING THE FILE, not by pasting it or using the editor's 'Run Selection':"
+    Write-Host    "[boxstrapper] > . .\testing\Enter-ResticEnv.ps1" -ForegroundColor Cyan
+    return
+}
 
 # The env we set only outlives this script if it ran in the caller's scope, i.e. dot-sourced.
 # When dot-sourced, InvocationName is '.'; otherwise warn and bail rather than silently no-op.
@@ -38,7 +53,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     return
 }
 
-. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')
+if (-not $SecretsFile) { $SecretsFile = Join-Path $scriptDir '..\secrets.ini' }
+
+. (Join-Path $scriptDir '..\Backup-Common.ps1')
 
 if (-not (Test-Path -LiteralPath $SecretsFile)) {
     Write-Warning "[boxstrapper] No secrets file at $SecretsFile; nothing to load."
