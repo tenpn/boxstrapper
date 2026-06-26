@@ -4,8 +4,9 @@
     Join the box to your Tailscale tailnet and reset `tailscale serve` to a clean slate. Idempotent.
 .DESCRIPTION
     Remote access is over Tailscale. This script does just the SHARED substrate: it joins the box to
-    your tailnet with an auth key, then resets the `tailscale serve` config so the published surface is
-    empty. It does NOT publish any service itself -- each service owns its own routing: Gitea-Setup.ps1
+    your tailnet with an auth key, opens the Windows Firewall to inbound tailnet traffic, then resets
+    the `tailscale serve` config so the published surface is empty. It does NOT publish any service
+    itself -- each service owns its own routing: Gitea-Setup.ps1
     publishes Gitea at /git (and sets its ROOT_URL from this box's MagicDNS name), and Jenkins-Setup.ps1
     publishes Jenkins at /jenkins. Update-Box.ps1 runs THIS script BEFORE those two on purpose, so the
     box is on the tailnet and its public name exists by the time they publish themselves.
@@ -87,6 +88,30 @@ if ($alreadyUp) {
     Write-Host "[boxstrapper] Joining the tailnet..." -ForegroundColor Cyan
     & $tailscale up --authkey $AuthKey --unattended
     if ($LASTEXITCODE -ne 0) { throw "tailscale up failed (exit code $LASTEXITCODE). Is the auth key valid and unexpired?" }
+}
+
+# --- allow inbound tailnet traffic through Windows Firewall ----------------
+# Windows Defender Firewall defaults inbound to Block. Tailscale's own rules (Tailscale-Process,
+# Tailscale-In) cover its kernel-level traffic, but `tailscale serve` listeners live in tailscaled's
+# USERSPACE netstack -- there's no kernel socket on :443 -- so an inbound TCP connection to a served
+# port matches none of those rules and hits the default block. The signature is maddening: `tailscale
+# ping` works (disco-level) and a same-box self-curl of the serve URL works (loopback bypasses the
+# inbound filter), yet every real TCP connection to /git or /jenkins TIMES OUT from other tailnet
+# nodes. We add an idempotent allow scoped by SOURCE ADDRESS to Tailscale's ranges (IPv4 CGNAT
+# 100.64.0.0/10 + IPv6 ULA fd7a:115c:a1e0::/48) -- matching by source (not port/process) is what makes
+# it cover the userspace serve listeners; LAN/WAN stays blocked. Best-effort: a firewall hiccup must
+# not wedge provisioning (the box is still on the tailnet either way).
+$tailnetRule = 'boxstrapper-tailnet-inbound'
+try {
+    if (-not (Get-NetFirewallRule -DisplayName $tailnetRule -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName $tailnetRule -Direction Inbound -Action Allow `
+            -Profile Any -RemoteAddress @('100.64.0.0/10', 'fd7a:115c:a1e0::/48') | Out-Null
+        Write-Host "[boxstrapper] Opened Windows Firewall for inbound tailnet traffic." -ForegroundColor Cyan
+    } else {
+        Write-Host "[boxstrapper] Tailnet inbound firewall rule already present." -ForegroundColor DarkGray
+    }
+} catch {
+    Write-Warning "Could not add the tailnet inbound firewall rule: $($_.Exception.Message)"
 }
 
 # --- reset the published `serve` surface to a clean slate ------------------
