@@ -16,7 +16,8 @@
 
     REMOTE ACCESS / ROUTING is owned HERE. Update-Box.ps1 runs Tailscale-Setup.ps1 first (joins the
     tailnet, clears the `serve` surface), so by the time this runs the box's MagicDNS name exists. This
-    script reads that name, sets Gitea's ROOT_URL/DOMAIN to https://<name>/git/, and publishes Gitea at
+    script reads that name, sets Gitea's ROOT_URL to https://<name>/git/ (and DOMAIN/SSH_DOMAIN to
+    <name>), and publishes Gitea at
     /git via `tailscale serve` (a BARE serve target -- Gitea uses the strip subpath model, serving at
     root while ROOT_URL makes it emit /git-prefixed links). Off the tailnet (sandbox / no auth key) all
     of that is skipped and Gitea just stays loopback-only.
@@ -270,8 +271,11 @@ if ($R2AccountId) {
 # --- routing: set ROOT_URL from this box's tailnet name (the authority for its public URL) -------
 # Gitea is loopback-only and can't know its own public hostname. Update-Box.ps1 brought Tailscale up
 # FIRST, so the box's MagicDNS name is available now; read it (or take an explicit -PublicHostname
-# override) and ensure app.ini's [server] ROOT_URL=https://<host><Prefix>/ + DOMAIN=<host>, so Gitea
-# emits <Prefix>-prefixed links behind the reverse proxy. Track whether the file changed so the start
+# override) and ensure app.ini's [server] ROOT_URL=https://<host><Prefix>/ + DOMAIN=<host> +
+# SSH_DOMAIN=<host>, so Gitea emits <Prefix>-prefixed links behind the proxy AND its SSH clone URLs name
+# THIS box. SSH_DOMAIN matters after a RESTORE: the restored app.ini carries the SOURCE box's SSH_DOMAIN
+# (DOMAIN/ROOT_URL get re-derived but SSH_DOMAIN would otherwise stay stale), so we re-derive all three.
+# Track whether the file changed so the start
 # step below restarts an already-running service to pick it up. Best-effort: a hiccup just warns.
 $tailscale   = Resolve-TailscaleExe
 $derivedHost = Get-TailnetHostname -TailscaleExe $tailscale   # $null unless on the tailnet
@@ -282,8 +286,9 @@ if ($tailnetHost -and (Test-Path -LiteralPath $configPath)) {
     try {
         $rootUrl = "https://$tailnetHost$Prefix/"
         $orig    = Get-Content -LiteralPath $configPath -Raw
-        $patched = Set-GiteaServerKey -Text $orig    -Key 'ROOT_URL' -Value $rootUrl
-        $patched = Set-GiteaServerKey -Text $patched -Key 'DOMAIN'   -Value $tailnetHost
+        $patched = Set-GiteaServerKey -Text $orig    -Key 'ROOT_URL'   -Value $rootUrl
+        $patched = Set-GiteaServerKey -Text $patched -Key 'DOMAIN'     -Value $tailnetHost
+        $patched = Set-GiteaServerKey -Text $patched -Key 'SSH_DOMAIN' -Value $tailnetHost
         if ($patched -ne $orig) {
             # ASCII matches the seed app.ini above; no BOM either way.
             [System.IO.File]::WriteAllText($configPath, $patched, [System.Text.Encoding]::ASCII)
