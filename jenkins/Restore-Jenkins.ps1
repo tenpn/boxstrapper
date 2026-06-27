@@ -51,7 +51,10 @@ param(
     [string]$Tag            = 'jenkins',
     # 'latest' = restic's most recent snapshot; pass a snapshot id for point-in-time recovery.
     [string]$SnapshotId     = 'latest',
-    # '' => <installDir>\boxstrapper-restore (a temp staging tree, cleaned up after).
+    # '' => <SystemDrive>\boxstrapper-jenkins-restore (a temp staging tree, cleaned up after). Kept SHORT
+    # and space-free on purpose: restic recreates the snapshot's full absolute path under this dir, so a
+    # long base (e.g. the MSI's "C:\Program Files\Jenkins\...") pushes Jenkins' deep plugin/build files
+    # past Windows' 260-char MAX_PATH and breaks the tree walk/copy below.
     [string]$RestoreStaging = ''
 )
 
@@ -105,7 +108,9 @@ $restic = $resticCmd.Source
 
 $paths = Resolve-JenkinsPaths -ServiceName $ServiceName
 if (-not $JenkinsHome) { $JenkinsHome = $paths.JenkinsHome }
-if (-not $RestoreStaging) { $RestoreStaging = Join-Path $paths.InstallDir 'boxstrapper-restore' }
+# Short, space-free staging on the system drive (NOT under the spaced MSI install dir) so the restored
+# absolute paths stay clear of the 260-char MAX_PATH ceiling -- see the -RestoreStaging param note.
+if (-not $RestoreStaging) { $RestoreStaging = Join-Path $env:SystemDrive 'boxstrapper-jenkins-restore' }
 
 # --- 1. is there anything to restore? (scope to the 'jenkins' tag in the shared repo) ---
 $r = Invoke-Native $restic @('snapshots', $SnapshotId, '--tag', $Tag, '--json')
@@ -120,15 +125,25 @@ if ($snaps.Count -eq 0) {
     Write-Host "[boxstrapper] No 'jenkins'-tagged snapshots in the restic repo; nothing to restore." -ForegroundColor DarkGray
     return
 }
+# The snapshot records the original (absolute) JENKINS_HOME it backed up (single path -- the Backup-Jenkins
+# tree backup). We use it below to locate the restored home DETERMINISTICALLY instead of scanning the
+# restored tree (a Get-ChildItem -Recurse over that tree silently finds nothing once any restored file
+# exceeds MAX_PATH -- the bug this restore previously hit on a default-install box).
+$srcHomePath = ''
+try { if ($snaps[0].paths -and $snaps[0].paths.Count -gt 0) { $srcHomePath = [string]$snaps[0].paths[0] } } catch { $srcHomePath = '' }
 
 # --- 2. never clobber an already-populated box -----------------------------
 # A fresh, MSI-booted Jenkins writes config.xml/secret.key but ZERO jobs, so "no marker AND no real job
 # config" = a box safe to restore onto. The marker locks it after the first restore so re-runs no-op.
 $marker  = Join-Path $JenkinsHome 'boxstrapper-restored.marker'
 $jobsDir = Join-Path $JenkinsHome 'jobs'
+# A job is a SUBDIRECTORY of jobs\ (jobs\<name>\config.xml); a fresh Jenkins has none. Check for any child
+# directory rather than a -Recurse config.xml scan -- the latter SILENTLY RETURNS NOTHING once a populated
+# jobs tree contains a >260-char path (deep build files), which would falsely report "no jobs" and let a
+# re-run clobber a human's jobs. A shallow directory check is immune to MAX_PATH.
 $hasRealJobs = $false
 if (Test-Path -LiteralPath $jobsDir) {
-    $hasRealJobs = [bool](Get-ChildItem -LiteralPath $jobsDir -Recurse -Filter 'config.xml' -File -ErrorAction SilentlyContinue |
+    $hasRealJobs = [bool](Get-ChildItem -LiteralPath $jobsDir -Directory -ErrorAction SilentlyContinue |
                           Select-Object -First 1)
 }
 if ((Test-Path -LiteralPath $marker) -or $hasRealJobs) {
@@ -144,20 +159,35 @@ try {
     $r = Invoke-Native $restic @('restore', $SnapshotId, '--tag', $Tag, '--target', $RestoreStaging)
     if ($r.Code -ne 0) { throw "restic restore failed (exit $($r.Code)): $($r.Output.Trim())" }
 
-    # restic recreates the original (absolute) JENKINS_HOME path under the target; the source box's
-    # install dir may differ from ours, so locate the restored home by its config.xml (shortest path
-    # wins -- the home's own config.xml, not a job's deeper jobs\<name>\config.xml).
-    $restoredHome = Get-ChildItem -LiteralPath $RestoreStaging -Recurse -Filter 'config.xml' -File -ErrorAction SilentlyContinue |
-                    Sort-Object { $_.FullName.Length } | Select-Object -First 1
-    if (-not $restoredHome) { throw "Restored snapshot contains no config.xml under $RestoreStaging; cannot locate JENKINS_HOME." }
-    $restoredHomeDir = $restoredHome.Directory.FullName
+    # restic recreates the original (absolute) JENKINS_HOME path under the target, e.g.
+    # <staging>\C\ProgramData\Jenkins\.jenkins for a snapshot of C:\ProgramData\Jenkins\.jenkins. DERIVE
+    # that path from the snapshot's recorded home ($srcHomePath) -- map "C:\..." -> "C\..." and join under
+    # the staging dir -- rather than a Get-ChildItem -Recurse scan, which silently returns NOTHING when the
+    # restored tree holds a >260-char path (Jenkins' deep plugin/build files do). The shortest-path scan is
+    # kept only as a fallback for an unexpected layout (and works because the home's config.xml is shallow).
+    $restoredHomeDir = $null
+    if ($srcHomePath) {
+        $rel       = $srcHomePath -replace '^([A-Za-z]):', '$1'   # "C:\...\.jenkins" -> "C\...\.jenkins"
+        $candidate = Join-Path $RestoreStaging $rel
+        if (Test-Path -LiteralPath (Join-Path $candidate 'config.xml')) { $restoredHomeDir = $candidate }
+    }
+    if (-not $restoredHomeDir) {
+        $restoredHome = Get-ChildItem -LiteralPath $RestoreStaging -Recurse -Filter 'config.xml' -File -ErrorAction SilentlyContinue |
+                        Sort-Object { $_.FullName.Length } | Select-Object -First 1
+        if ($restoredHome) { $restoredHomeDir = $restoredHome.Directory.FullName }
+    }
+    if (-not $restoredHomeDir) { throw "Restored snapshot contains no config.xml under $RestoreStaging; cannot locate JENKINS_HOME." }
 
     # --- 4. copy the restored tree over the live JENKINS_HOME ---------------
-    # Overwrites the default files the auto-started Jenkins wrote. -Path (not -LiteralPath) so the
-    # trailing '*' expands to the restored home's children.
+    # Overwrites the default files the auto-started Jenkins wrote (incl. secret.key, so credentials.xml
+    # stays decryptable). Use robocopy, NOT Copy-Item -Recurse: robocopy copies the tree natively with no
+    # 260-char MAX_PATH ceiling, so Jenkins' deep plugin/build paths come across intact. /E = all subdirs
+    # incl. empty; overlay (no /MIR -- we lay the snapshot ON TOP of the fresh home, never purge). robocopy
+    # exit codes 0-7 are success (bits: copied/extra/mismatch); >= 8 means a real failure.
     if (-not (Test-Path -LiteralPath $JenkinsHome)) { New-Item -ItemType Directory -Path $JenkinsHome -Force | Out-Null }
     Write-Host "[boxstrapper] Restoring Jenkins data into $JenkinsHome..." -ForegroundColor Cyan
-    Copy-Item -Path (Join-Path $restoredHomeDir '*') -Destination $JenkinsHome -Recurse -Force
+    & robocopy $restoredHomeDir $JenkinsHome /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit $LASTEXITCODE) copying restored data into $JenkinsHome." }
 
     # --- 5. mark it restored so a bootstrap re-run is a clean no-op ---------
     Set-Content -LiteralPath $marker -Value (Get-Date -Format o) -Encoding ASCII
