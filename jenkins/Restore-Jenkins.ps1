@@ -90,6 +90,29 @@ function Resolve-JenkinsPaths {
     return [pscustomobject]@{ InstallDir = $installDir; JenkinsHome = $jhome }
 }
 
+function Find-RestoredHomeDir {
+    # Locate the restored JENKINS_HOME under a restic --target dir WITHOUT Get-ChildItem -Recurse, which in
+    # Windows PowerShell 5.1 returns NOTHING the moment the tree holds an access-denied OR >260-char path --
+    # BOTH occur in a restored Jenkins tree (restic restores the source's NTFS ACLs, and plugin/build paths
+    # run deep). Walk down breadth-first with NON-recursive listings instead: the home's config.xml sits only
+    # a few levels under the target (restic recreates <target>\<drive>\<path>\config.xml), so we hit it before
+    # ever descending into the deep/locked plugin & build dirs. Bounded visit count as a stop guard.
+    param([Parameter(Mandatory)][string]$Root)
+    $queue = New-Object System.Collections.Generic.Queue[string]
+    $queue.Enqueue($Root)
+    $visited = 0
+    while ($queue.Count -gt 0 -and $visited -lt 200) {
+        $dir = $queue.Dequeue()
+        $visited++
+        if (Test-Path -LiteralPath (Join-Path $dir 'config.xml')) { return $dir }
+        # -Force: restic restores source file attributes, so intermediate dirs like ProgramData come back
+        # HIDDEN -- without -Force, Get-ChildItem skips them and the walk dead-ends before reaching the home.
+        Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction SilentlyContinue |
+            ForEach-Object { $queue.Enqueue($_.FullName) }
+    }
+    return $null
+}
+
 # --- credentials: blank => offsite backup not configured, nothing to restore from ---
 if (-not $R2AccountId -or -not $R2Bucket -or -not $R2AccessKeyId -or -not $R2SecretKey -or -not $ResticPassword) {
     Write-Host "[boxstrapper] Offsite backup not configured; nothing to restore from." -ForegroundColor DarkGray
@@ -127,10 +150,17 @@ if ($snaps.Count -eq 0) {
 }
 # The snapshot records the original (absolute) JENKINS_HOME it backed up (single path -- the Backup-Jenkins
 # tree backup). We use it below to locate the restored home DETERMINISTICALLY instead of scanning the
-# restored tree (a Get-ChildItem -Recurse over that tree silently finds nothing once any restored file
-# exceeds MAX_PATH -- the bug this restore previously hit on a default-install box).
+# restored tree (a Get-ChildItem -Recurse over that tree silently finds nothing once a restored file is
+# access-denied or exceeds MAX_PATH -- the bug this restore previously hit).
+# NOTE: Windows PowerShell 5.1's ConvertFrom-Json unwraps a SINGLE-element JSON array into a scalar, so
+# $snaps[0].paths is a bare string here (it's an array under pwsh 7). Handle BOTH -- calling .Count on the
+# string throws under StrictMode, which is exactly what previously left this blank and broke the locate.
 $srcHomePath = ''
-try { if ($snaps[0].paths -and $snaps[0].paths.Count -gt 0) { $srcHomePath = [string]$snaps[0].paths[0] } } catch { $srcHomePath = '' }
+try {
+    $p = $snaps[0].paths
+    if ($p -is [array]) { if ($p.Count -gt 0) { $srcHomePath = [string]$p[0] } }
+    elseif ($p)         { $srcHomePath = [string]$p }
+} catch { $srcHomePath = '' }
 
 # --- 2. never clobber an already-populated box -----------------------------
 # A fresh, MSI-booted Jenkins writes config.xml/secret.key but ZERO jobs, so "no marker AND no real job
@@ -143,7 +173,7 @@ $jobsDir = Join-Path $JenkinsHome 'jobs'
 # re-run clobber a human's jobs. A shallow directory check is immune to MAX_PATH.
 $hasRealJobs = $false
 if (Test-Path -LiteralPath $jobsDir) {
-    $hasRealJobs = [bool](Get-ChildItem -LiteralPath $jobsDir -Directory -ErrorAction SilentlyContinue |
+    $hasRealJobs = [bool](Get-ChildItem -LiteralPath $jobsDir -Directory -Force -ErrorAction SilentlyContinue |
                           Select-Object -First 1)
 }
 if ((Test-Path -LiteralPath $marker) -or $hasRealJobs) {
@@ -162,20 +192,18 @@ try {
     # restic recreates the original (absolute) JENKINS_HOME path under the target, e.g.
     # <staging>\C\ProgramData\Jenkins\.jenkins for a snapshot of C:\ProgramData\Jenkins\.jenkins. DERIVE
     # that path from the snapshot's recorded home ($srcHomePath) -- map "C:\..." -> "C\..." and join under
-    # the staging dir -- rather than a Get-ChildItem -Recurse scan, which silently returns NOTHING when the
-    # restored tree holds a >260-char path (Jenkins' deep plugin/build files do). The shortest-path scan is
-    # kept only as a fallback for an unexpected layout (and works because the home's config.xml is shallow).
+    # the staging dir -- rather than a Get-ChildItem -Recurse scan, which silently returns NOTHING under 5.1
+    # the moment the restored tree holds an access-denied or >260-char path (Jenkins' deep plugin/build
+    # files do). The BFS walk (Find-RestoredHomeDir) is the fallback for an unexpected layout.
     $restoredHomeDir = $null
     if ($srcHomePath) {
         $rel       = $srcHomePath -replace '^([A-Za-z]):', '$1'   # "C:\...\.jenkins" -> "C\...\.jenkins"
         $candidate = Join-Path $RestoreStaging $rel
         if (Test-Path -LiteralPath (Join-Path $candidate 'config.xml')) { $restoredHomeDir = $candidate }
     }
-    if (-not $restoredHomeDir) {
-        $restoredHome = Get-ChildItem -LiteralPath $RestoreStaging -Recurse -Filter 'config.xml' -File -ErrorAction SilentlyContinue |
-                        Sort-Object { $_.FullName.Length } | Select-Object -First 1
-        if ($restoredHome) { $restoredHomeDir = $restoredHome.Directory.FullName }
-    }
+    # Fallback for an unexpected layout: a breadth-first walk that is immune to the MAX_PATH/access-denied
+    # silent-empty failure of Get-ChildItem -Recurse under 5.1 (see Find-RestoredHomeDir).
+    if (-not $restoredHomeDir) { $restoredHomeDir = Find-RestoredHomeDir -Root $RestoreStaging }
     if (-not $restoredHomeDir) { throw "Restored snapshot contains no config.xml under $RestoreStaging; cannot locate JENKINS_HOME." }
 
     # --- 4. copy the restored tree over the live JENKINS_HOME ---------------
