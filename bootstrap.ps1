@@ -114,6 +114,17 @@ if (Test-Command 'git') {
     Update-Path
 }
 
+# Sensible build-server git defaults, machine-wide (--system) so they also apply
+# to the SYSTEM account Jenkins builds run under -- not just this bootstrap user.
+# Set before the clone so the first checkout honours them. Idempotent; run every time.
+git config --system core.autocrlf input        # normalise EOL on commit, leave the working tree alone
+git config --system core.longpaths true        # survive Windows' 260-char MAX_PATH on deep checkouts
+git config --system core.fscache true           # Windows filesystem cache for faster status/checkout
+git config --system fetch.prune true            # drop stale remote-tracking branches on every fetch
+git config --system pull.ff only                # never auto-create a merge commit on pull
+git config --system advice.detachedHead false   # silence detached-HEAD noise (CI checks out detached constantly)
+git config --system init.defaultBranch main     # match this repo's main-branch convention
+
 # --- clone or update the repo at the target branch -------------------------
 if (Test-Path (Join-Path $Dir '.git')) {
     Write-Host "[boxstrapper] Updating existing clone at $Dir ($Branch)..." -ForegroundColor Cyan
