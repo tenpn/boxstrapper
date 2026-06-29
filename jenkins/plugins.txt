@@ -17,6 +17,7 @@ nunit
 throttle-concurrents
 timestamper
 text-finder
+slack
 
 # pipeline
 workflow-aggregator
