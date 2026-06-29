@@ -555,11 +555,16 @@ if ($ServiceAccountPassword) {
 
         # 4. File rights the non-admin account needs: Modify on the install dir (WinSW writes its logs
         #    beside jenkins.xml, and Program Files is read-only for non-admins) and Full control on
-        #    JENKINS_HOME (Jenkins owns everything under it -- jobs, plugins, secrets/ master keys). The
-        #    (OI)(CI) inheritable ACEs propagate to existing and future children; re-granting is a no-op.
-        & icacls $installDir /grant ("{0}:(OI)(CI)M" -f $ServiceAccount) /C /Q | Out-Null
+        #    JENKINS_HOME (Jenkins owns everything under it -- jobs, plugins, secrets/ master keys). /T
+        #    applies the ACE to the EXISTING tree, not just future children -- the load-bearing flag here:
+        #    the plugins were already written (by jenkins-plugin-cli, as admin) BEFORE this runs, and a
+        #    plain inheritable (OI)(CI) grant does NOT reliably reach existing files. Without /T the service
+        #    (now .\jenkins) can read config.xml via ProgramData's default Users:Read and boot, yet can't
+        #    write the plugins dir to explode each .jpi ("Failed to expand ...\<plugin>.jpi" for EVERY
+        #    plugin). /C continues past any transiently-locked file; (OI)(CI) still covers future children.
+        & icacls $installDir /grant ("{0}:(OI)(CI)M" -f $ServiceAccount) /T /C /Q | Out-Null
         if (Test-Path -LiteralPath $jenkinsHome) {
-            & icacls $jenkinsHome /grant ("{0}:(OI)(CI)F" -f $ServiceAccount) /C /Q | Out-Null
+            & icacls $jenkinsHome /grant ("{0}:(OI)(CI)F" -f $ServiceAccount) /T /C /Q | Out-Null
         }
 
         # 5. Switch the service's logon identity (also covers an EXISTING service: read its current identity
