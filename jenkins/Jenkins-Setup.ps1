@@ -525,7 +525,7 @@ if ($ServiceAccountPassword) {
             Write-Host "[boxstrapper] Updated local service account '$ServiceAccount' (password re-applied)." -ForegroundColor DarkGray
         } else {
             New-LocalUser -Name $ServiceAccount -Password $securePw -FullName 'Jenkins service' `
-                -Description 'Non-admin account the Jenkins service runs as (boxstrapper).' `
+                -Description 'Jenkins service account (boxstrapper).' `
                 -PasswordNeverExpires -AccountNeverExpires | Out-Null
             Write-Host "[boxstrapper] Created non-admin local service account '$ServiceAccount'." -ForegroundColor Cyan
         }
