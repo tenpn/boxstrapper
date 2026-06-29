@@ -41,6 +41,15 @@
          creds are blank. So commenting out Jenkins' one Update-Box.ps1 call drops the service, its
          monitoring, AND its backup together -- they live and die with this script.
 
+      6. DEDICATED SERVICE ACCOUNT -- when -ServiceAccountPassword is supplied (secrets.ini's
+         JENKINS_SERVICE_PASSWORD) we stop running Jenkins as LocalSystem. Jenkins runs arbitrary build
+         code, so we create/update a NON-admin local '$ServiceAccount' user (default 'jenkins'), grant it
+         "Log on as a service" + the file rights it needs (Modify on the install dir for WinSW's logs,
+         Full control on JENKINS_HOME), add it to Remote Desktop Users where that group exists (so you can
+         RDP in as it over the tailnet), then switch the service's logon identity to it -- reconfiguring an
+         EXISTING service in place and restarting only when the identity actually changed. A blank password
+         leaves Jenkins as LocalSystem (non-fatal skip), so a throwaway box still provisions.
+
     JAVA: the jenkins package does NOT bundle a JDK and aborts its install without one, so
     packages.config ships temurin21 and Update-Box.ps1 installs it (and refreshes JAVA_HOME onto the
     session) BEFORE the manifest installs jenkins. We reuse that JAVA_HOME to run jenkins-plugin-cli.
@@ -73,6 +82,14 @@ param(
     # Pinned plugin-installation-manager-tool release used to fetch/resolve the plugins. Bump as needed;
     # a download failure is non-fatal (it just warns and skips plugin install this run).
     [string]$PluginCliVersion = '2.15.0',
+    # Dedicated NON-admin local account the Jenkins service logs on as (created/updated here, then the
+    # service is switched off its default LocalSystem to it so Jenkins' arbitrary builds run unprivileged).
+    [string]$ServiceAccount = 'jenkins',
+    # Password for $ServiceAccount (Update-Box.ps1 passes JENKINS_SERVICE_PASSWORD from secrets.ini). BLANK
+    # => the whole dedicated-account step is skipped and Jenkins keeps running as LocalSystem (non-fatal,
+    # like every other secret), so a throwaway box still provisions. Non-blank => the account's password is
+    # (re)set to this every run (secrets.ini is the source of truth; rotate by editing it and re-running).
+    [string]$ServiceAccountPassword = '',
     # Absolute path to secrets.ini, forwarded to the Jenkins backup setup so its weekly SYSTEM task can
     # re-read secrets at run time (a task argument can't carry secrets safely). Blank => the backup setup
     # falls back to the repo-root secrets.ini next to this jenkins\ folder.
@@ -243,6 +260,44 @@ function Remove-JenkinsXmlEnv {
     $lineGone = [regex]::Replace($Raw, '(?m)^[ \t]*<env\s+name="' + [regex]::Escape($Name) + '"\s+value="[^"]*"\s*/>[ \t]*\r?\n', '')
     if ($lineGone -ne $Raw) { return $lineGone }
     return [regex]::Replace($Raw, '\s*<env\s+name="' + [regex]::Escape($Name) + '"\s+value="[^"]*"\s*/>', '')
+}
+
+function Add-ServiceLogonRight {
+    # Ensure $Account holds SeServiceLogonRight ("Log on as a service"). A programmatic service-account
+    # change (Win32_Service.Change below) does NOT grant this the way the Services MMC does, and without it
+    # the service fails to start with error 1069. secedit is the script-only way to edit a user-rights
+    # assignment: we EXPORT the current USER_RIGHTS (so we preserve every existing holder -- a minimal
+    # template would REMOVE them), append our SID to the SeServiceLogonRight line, and re-apply. Returns
+    # $true if it added the right, $false if it was already present. PS 5.1-safe.
+    param([Parameter(Mandatory)][string]$Account)
+    $sid  = (New-Object Security.Principal.NTAccount($Account)).Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+    $base = Join-Path $env:TEMP ('boxstrapper-secpol-' + [guid]::NewGuid().ToString('N'))
+    $inf  = "$base.inf"
+    $sdb  = "$base.sdb"
+    try {
+        & secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "secedit /export failed ($LASTEXITCODE)." }
+        $lines     = Get-Content -LiteralPath $inf
+        $rightLine = $lines | Where-Object { $_ -match '^\s*SeServiceLogonRight\s*=' } | Select-Object -First 1
+        if ($rightLine) {
+            if ($rightLine -match [regex]::Escape($sid)) { return $false }   # already granted
+            $updated = $rightLine.TrimEnd() + ",*$sid"
+            $lines   = $lines | ForEach-Object { if ($_ -eq $rightLine) { $updated } else { $_ } }
+        } else {
+            # No account currently holds the right: add the line right after the [Privilege Rights] header.
+            $lines = $lines | ForEach-Object {
+                $_
+                if ($_ -match '^\s*\[Privilege Rights\]\s*$') { "SeServiceLogonRight = *$sid" }
+            }
+        }
+        Set-Content -LiteralPath $inf -Value $lines -Encoding Unicode
+        & secedit /configure /db $sdb /cfg $inf /areas USER_RIGHTS /quiet | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "secedit /configure failed ($LASTEXITCODE)." }
+        return $true
+    } finally {
+        Remove-Item -LiteralPath $inf, $sdb -ErrorAction SilentlyContinue
+    }
 }
 
 # --- locate the service and its WinSW config (jenkins.xml) ------------------
@@ -446,6 +501,92 @@ if ($pluginLines.Count -gt 0) {
     }
 }
 
+# --- run Jenkins as a dedicated NON-admin local account (instead of LocalSystem) -------------------
+# Jenkins runs arbitrary build code, so we don't want it as LocalSystem. When a service-account password
+# is supplied we create/update a local '$ServiceAccount' user (NEVER in Administrators), grant it
+# "Log on as a service", give it the file rights it needs (Modify on the install dir for WinSW's logs,
+# Full control on JENKINS_HOME), add it to Remote Desktop Users so it can RDP in over the tailnet (where
+# that group exists), then switch the service's logon identity to it -- updating an EXISTING service in
+# place. Changing identity needs a restart, tracked in $serviceAccountChanged for the apply block. Blank
+# password => leave the service as LocalSystem (non-fatal skip, so a sandbox still provisions). All
+# best-effort: a failure here just warns and leaves Jenkins running as whatever it was.
+$serviceAccountChanged = $false
+if ($ServiceAccountPassword) {
+    try {
+        $securePw = ConvertTo-SecureString $ServiceAccountPassword -AsPlainText -Force
+
+        # 1. Create or update the local account. PasswordNeverExpires keeps an expiring password from
+        #    silently breaking the service; we re-assert the password each run (secrets.ini is the source
+        #    of truth). Created in Users only -- never Administrators (running unprivileged is the point).
+        $existing = Get-LocalUser -Name $ServiceAccount -ErrorAction SilentlyContinue
+        if ($existing) {
+            Set-LocalUser -Name $ServiceAccount -Password $securePw -PasswordNeverExpires $true
+            if (-not $existing.Enabled) { Enable-LocalUser -Name $ServiceAccount }
+            Write-Host "[boxstrapper] Updated local service account '$ServiceAccount' (password re-applied)." -ForegroundColor DarkGray
+        } else {
+            New-LocalUser -Name $ServiceAccount -Password $securePw -FullName 'Jenkins service' `
+                -Description 'Non-admin account the Jenkins service runs as (boxstrapper).' `
+                -PasswordNeverExpires -AccountNeverExpires | Out-Null
+            Write-Host "[boxstrapper] Created non-admin local service account '$ServiceAccount'." -ForegroundColor Cyan
+        }
+
+        # 2. Remote Desktop access: add to Remote Desktop Users (well-known SID S-1-5-32-555, resolved by
+        #    SID so it works on non-English Windows). Skipped where the group doesn't exist ("if the OS
+        #    supports it"). Enabling the RDP LISTENER is a separate box-wide step (RemoteDesktop-Setup.ps1,
+        #    its own Update-Box section); once it's on, the tailnet inbound firewall allow already scopes RDP
+        #    to the tailnet, so this group membership is all Jenkins' account needs to log in.
+        $rdpGroup = Get-LocalGroup -SID 'S-1-5-32-555' -ErrorAction SilentlyContinue
+        if ($rdpGroup) {
+            try {
+                Add-LocalGroupMember -Group $rdpGroup -Member $ServiceAccount -ErrorAction Stop
+                Write-Host "[boxstrapper] Added '$ServiceAccount' to '$($rdpGroup.Name)' (RDP over the tailnet)." -ForegroundColor DarkGray
+            } catch {
+                if ("$($_.FullyQualifiedErrorId)" -notlike '*MemberExists*') { throw }
+                Write-Host "[boxstrapper] '$ServiceAccount' already in '$($rdpGroup.Name)'." -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "[boxstrapper] No Remote Desktop Users group on this OS; skipping the RDP access grant." -ForegroundColor DarkGray
+        }
+
+        # 3. Grant "Log on as a service" (see Add-ServiceLogonRight's header for why this is required).
+        if (Add-ServiceLogonRight -Account $ServiceAccount) {
+            Write-Host "[boxstrapper] Granted 'Log on as a service' to '$ServiceAccount'." -ForegroundColor DarkGray
+        }
+
+        # 4. File rights the non-admin account needs: Modify on the install dir (WinSW writes its logs
+        #    beside jenkins.xml, and Program Files is read-only for non-admins) and Full control on
+        #    JENKINS_HOME (Jenkins owns everything under it -- jobs, plugins, secrets/ master keys). The
+        #    (OI)(CI) inheritable ACEs propagate to existing and future children; re-granting is a no-op.
+        & icacls $installDir /grant ("{0}:(OI)(CI)M" -f $ServiceAccount) /C /Q | Out-Null
+        if (Test-Path -LiteralPath $jenkinsHome) {
+            & icacls $jenkinsHome /grant ("{0}:(OI)(CI)F" -f $ServiceAccount) /C /Q | Out-Null
+        }
+
+        # 5. Switch the service's logon identity (also covers an EXISTING service: read its current identity
+        #    and only flag a restart when it differs). Done via WMI Change so the password isn't exposed on
+        #    a command line. '.\' = this machine's local account. We re-apply the password every run (it may
+        #    have rotated) but only restart when the IDENTITY changed -- re-applying the same one needn't
+        #    bounce the running process.
+        $svcCim       = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+        $currentLogon = $svcCim.StartName
+        $desiredLogon = ".\$ServiceAccount"
+        $change = Invoke-CimMethod -InputObject $svcCim -MethodName Change `
+            -Arguments @{ StartName = $desiredLogon; StartPassword = $ServiceAccountPassword }
+        if ($change.ReturnValue -ne 0) {
+            throw "Win32_Service.Change returned $($change.ReturnValue) setting the logon account."
+        }
+        $currentLeaf = if ($currentLogon) { ($currentLogon -split '\\')[-1].ToLowerInvariant() } else { '' }
+        if ($currentLeaf -ne $ServiceAccount.ToLowerInvariant()) {
+            $serviceAccountChanged = $true
+            Write-Host "[boxstrapper] Jenkins service logon set to '$desiredLogon' (was '$currentLogon')." -ForegroundColor Cyan
+        } else {
+            Write-Host "[boxstrapper] Jenkins service already runs as '$desiredLogon'; password re-applied." -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warning "Dedicated Jenkins service account setup failed: $($_.Exception.Message) (Jenkins still runs as before)."
+    }
+}
+
 # --- apply: (re)start so the new config/plugins/admin take effect, else just ensure it's up --------
 # A 'Running' service only means WinSW's wrapper is up; we still probe the web port below for real
 # health. If we stopped the service to install plugins it's down now, so Start it; if config changed
@@ -454,7 +595,7 @@ $svc = Get-Service -Name $ServiceName
 if ($svc.Status -ne 'Running') {
     Write-Host "[boxstrapper] Starting '$ServiceName'..." -ForegroundColor Cyan
     Start-Service -Name $ServiceName
-} elseif ($xmlChanged -or $groovyChanged -or $pluginsInstalled) {
+} elseif ($xmlChanged -or $groovyChanged -or $pluginsInstalled -or $serviceAccountChanged) {
     Write-Host "[boxstrapper] Restarting '$ServiceName' to apply changes..." -ForegroundColor Cyan
     Restart-Service -Name $ServiceName -Force
 } else {

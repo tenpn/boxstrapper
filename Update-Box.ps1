@@ -165,20 +165,27 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
 #        We only PARSE the secrets here and hand them in as params; a blank JENKINS_ADMIN_PASSWORD keeps the
 #        interactive wizard. The R2/restic creds + the secrets.ini PATH feed both the restore and backup. ---
 & (Join-Path $PSScriptRoot 'jenkins\Jenkins-Setup.ps1') `
-    -AdminUser        $secrets['JENKINS_ADMIN_USER'] `
-    -AdminPassword    $secrets['JENKINS_ADMIN_PASSWORD'] `
-    -HeartbeatPingUrl $secrets['HC_JENKINS_PING_URL'] `
-    -SecretsFile      $secretsFile `
-    -R2AccountId      $secrets['R2_ACCOUNT_ID'] `
-    -R2Bucket         $secrets['R2_BUCKET'] `
-    -R2AccessKeyId    $secrets['R2_ACCESS_KEY_ID'] `
-    -R2SecretKey      $secrets['R2_SECRET_ACCESS_KEY'] `
-    -ResticPassword   $secrets['RESTIC_PASSWORD']
+    -AdminUser              $secrets['JENKINS_ADMIN_USER'] `
+    -AdminPassword          $secrets['JENKINS_ADMIN_PASSWORD'] `
+    -ServiceAccountPassword $secrets['JENKINS_SERVICE_PASSWORD'] `
+    -HeartbeatPingUrl       $secrets['HC_JENKINS_PING_URL'] `
+    -SecretsFile            $secretsFile `
+    -R2AccountId            $secrets['R2_ACCOUNT_ID'] `
+    -R2Bucket               $secrets['R2_BUCKET'] `
+    -R2AccessKeyId          $secrets['R2_ACCESS_KEY_ID'] `
+    -R2SecretKey            $secrets['R2_SECRET_ACCESS_KEY'] `
+    -ResticPassword         $secrets['RESTIC_PASSWORD']
 
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']
 
-# --- 7. other idempotent setup steps go here -------------------------------
+# --- 7. Remote Desktop (enable the RDP listener; tailnet-only -- see RemoteDesktop-Setup.ps1). Its OWN
+#        step, not part of Jenkins-Setup: enabling the listener is box-wide, whereas Jenkins-Setup only
+#        grants its service account RDP access by adding it to the Remote Desktop Users group. No secret --
+#        reachability is gated by Tailscale-Setup's tailnet firewall rule + group membership. ---
+& (Join-Path $PSScriptRoot 'RemoteDesktop-Setup.ps1')
+
+# --- 8. other idempotent setup steps go here -------------------------------
 # (settings sync, dotfiles, etc.)
 
 Write-Host '[boxstrapper] Done.' -ForegroundColor Green
