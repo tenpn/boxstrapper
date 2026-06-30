@@ -300,6 +300,19 @@ function Add-ServiceLogonRight {
     }
 }
 
+function Set-TreeAccess {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Sid,
+        [Parameter(Mandatory)][string]$Mask
+    )
+    # two passes, so we get both files and directories
+    & icacls $Path /grant ("*{0}:(OI)(CI){1}" -f $Sid, $Mask) /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "icacls inheritable grant on '$Path' returned $LASTEXITCODE." }
+    & icacls $Path /grant ("*{0}:{1}" -f $Sid, $Mask) /T /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "icacls recursive grant on '$Path' returned $LASTEXITCODE; some files may be inaccessible to the service account (plugins can fail to expand)." }
+}
+
 # --- locate the service and its WinSW config (jenkins.xml) ------------------
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) {
@@ -502,22 +515,13 @@ if ($pluginLines.Count -gt 0) {
 }
 
 # --- run Jenkins as a dedicated NON-admin local account (instead of LocalSystem) -------------------
-# Jenkins runs arbitrary build code, so we don't want it as LocalSystem. When a service-account password
-# is supplied we create/update a local '$ServiceAccount' user (NEVER in Administrators), grant it
-# "Log on as a service", give it the file rights it needs (Modify on the install dir for WinSW's logs,
-# Full control on JENKINS_HOME), add it to Remote Desktop Users so it can RDP in over the tailnet (where
-# that group exists), then switch the service's logon identity to it -- updating an EXISTING service in
-# place. Changing identity needs a restart, tracked in $serviceAccountChanged for the apply block. Blank
-# password => leave the service as LocalSystem (non-fatal skip, so a sandbox still provisions). All
-# best-effort: a failure here just warns and leaves Jenkins running as whatever it was.
+# Blank password => leave the service as LocalSystem
 $serviceAccountChanged = $false
 if ($ServiceAccountPassword) {
     try {
         $securePw = ConvertTo-SecureString $ServiceAccountPassword -AsPlainText -Force
 
-        # 1. Create or update the local account. PasswordNeverExpires keeps an expiring password from
-        #    silently breaking the service; we re-assert the password each run (secrets.ini is the source
-        #    of truth). Created in Users only -- never Administrators (running unprivileged is the point).
+        # 1. Create or update the local account. 
         $existing = Get-LocalUser -Name $ServiceAccount -ErrorAction SilentlyContinue
         if ($existing) {
             Set-LocalUser -Name $ServiceAccount -Password $securePw -PasswordNeverExpires $true
@@ -531,10 +535,7 @@ if ($ServiceAccountPassword) {
         }
 
         # 2. Remote Desktop access: add to Remote Desktop Users (well-known SID S-1-5-32-555, resolved by
-        #    SID so it works on non-English Windows). Skipped where the group doesn't exist ("if the OS
-        #    supports it"). Enabling the RDP LISTENER is a separate box-wide step (RemoteDesktop-Setup.ps1,
-        #    its own Update-Box section); once it's on, the tailnet inbound firewall allow already scopes RDP
-        #    to the tailnet, so this group membership is all Jenkins' account needs to log in.
+        #    SID so it works on non-English Windows). Skipped if the OS doesn't support it. 
         $rdpGroup = Get-LocalGroup -SID 'S-1-5-32-555' -ErrorAction SilentlyContinue
         if ($rdpGroup) {
             try {
@@ -553,18 +554,11 @@ if ($ServiceAccountPassword) {
             Write-Host "[boxstrapper] Granted 'Log on as a service' to '$ServiceAccount'." -ForegroundColor DarkGray
         }
 
-        # 4. File rights the non-admin account needs: Modify on the install dir (WinSW writes its logs
-        #    beside jenkins.xml, and Program Files is read-only for non-admins) and Full control on
-        #    JENKINS_HOME (Jenkins owns everything under it -- jobs, plugins, secrets/ master keys). /T
-        #    applies the ACE to the EXISTING tree, not just future children -- the load-bearing flag here:
-        #    the plugins were already written (by jenkins-plugin-cli, as admin) BEFORE this runs, and a
-        #    plain inheritable (OI)(CI) grant does NOT reliably reach existing files. Without /T the service
-        #    (now .\jenkins) can read config.xml via ProgramData's default Users:Read and boot, yet can't
-        #    write the plugins dir to explode each .jpi ("Failed to expand ...\<plugin>.jpi" for EVERY
-        #    plugin). /C continues past any transiently-locked file; (OI)(CI) still covers future children.
-        & icacls $installDir /grant ("{0}:(OI)(CI)M" -f $ServiceAccount) /T /C /Q | Out-Null
+        # 4. File rights the non-admin account needs.
+        $svcSid = (Get-LocalUser -Name $ServiceAccount).SID.Value
+        Set-TreeAccess -Path $installDir -Sid $svcSid -Mask 'M'
         if (Test-Path -LiteralPath $jenkinsHome) {
-            & icacls $jenkinsHome /grant ("{0}:(OI)(CI)F" -f $ServiceAccount) /T /C /Q | Out-Null
+            Set-TreeAccess -Path $jenkinsHome -Sid $svcSid -Mask 'F'
         }
 
         # 5. Switch the service's logon identity (also covers an EXISTING service: read its current identity
