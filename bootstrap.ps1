@@ -110,10 +110,11 @@ if (Test-Command 'git') {
     Write-Host '[boxstrapper] git already installed.' -ForegroundColor Green
 } else {
     Write-Host '[boxstrapper] Installing git...' -ForegroundColor Cyan
-    choco install git -y
+    # git lives here (not packages.config): bootstrap needs it to clone the repo before
+    # Update-Box/the manifest even exist locally. Pinned for reproducible boxes.
+    choco install git --version 2.55.0 -y
     Update-Path
 }
-
 # Sensible build-server git defaults, machine-wide (--system) so they also apply
 # to the SYSTEM account Jenkins builds run under -- not just this bootstrap user.
 # Set before the clone so the first checkout honours them. Idempotent; run every time.

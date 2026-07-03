@@ -92,11 +92,10 @@ $secrets = Read-Secrets -Path $secretsFile
 # --- 1. apply the choco manifest -------------------------------------------
 $manifest = Join-Path $PSScriptRoot 'packages.config'
 # Jenkins' choco package ABORTS unless JAVA_HOME is set, but temurin21's MSI sets the machine PATH
-# and NOT JAVA_HOME -- so install the JDK first, then set JAVA_HOME (this process so the manifest's
-# choco child inherits it, and permanently so re-runs/other tools see it) BEFORE the manifest reaches
-# the jenkins package. temurin21 is also in packages.config; this is the ordering + JAVA_HOME fix.
+# and NOT JAVA_HOME -- so install the JDK first, then set JAVA_HOME BEFORE the manifest reaches
+# the jenkins package. 
 Write-Host "[boxstrapper] Ensuring a JDK is present for Jenkins (temurin21)..." -ForegroundColor Cyan
-choco install temurin21 --version 21.0.9.10 -y   # keep in sync with the temurin21 pin in packages.config
+choco install temurin21 --version 21.0.9.10 -y
 Update-Path
 $javaHome = Resolve-JavaHome
 if ($javaHome) {
@@ -109,10 +108,9 @@ if ($javaHome) {
 # sysinternals' choco package pins a SHA256 for SysinternalsSuite.zip, but Microsoft republishes that
 # zip IN PLACE at the same URL, so the pinned hash goes stale (and the manifest install fails on it)
 # until the maintainer catches up. The download is from Microsoft's own URL, so install it here with
-# --ignore-checksums scoped to JUST this package; the manifest then skips it (already installed).
-# Drop this line once the upstream package refreshes its checksum.
+# --ignore-checksums scoped to JUST this package. 
 Write-Host "[boxstrapper] Installing sysinternals (skipping its stale upstream checksum)..." -ForegroundColor Cyan
-choco install sysinternals --version 2026.6.17 -y --ignore-checksums   # keep in sync with the sysinternals pin in packages.config
+choco install sysinternals --version 2026.6.17 -y --ignore-checksums
 Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor Cyan
 choco install $manifest -y
 Update-Path
