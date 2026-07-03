@@ -96,7 +96,7 @@ $manifest = Join-Path $PSScriptRoot 'packages.config'
 # choco child inherits it, and permanently so re-runs/other tools see it) BEFORE the manifest reaches
 # the jenkins package. temurin21 is also in packages.config; this is the ordering + JAVA_HOME fix.
 Write-Host "[boxstrapper] Ensuring a JDK is present for Jenkins (temurin21)..." -ForegroundColor Cyan
-choco install temurin21 -y
+choco install temurin21 --version 21.0.9.10 -y   # keep in sync with the temurin21 pin in packages.config
 Update-Path
 $javaHome = Resolve-JavaHome
 if ($javaHome) {
@@ -112,7 +112,7 @@ if ($javaHome) {
 # --ignore-checksums scoped to JUST this package; the manifest then skips it (already installed).
 # Drop this line once the upstream package refreshes its checksum.
 Write-Host "[boxstrapper] Installing sysinternals (skipping its stale upstream checksum)..." -ForegroundColor Cyan
-choco install sysinternals -y --ignore-checksums
+choco install sysinternals --version 2026.6.17 -y --ignore-checksums   # keep in sync with the sysinternals pin in packages.config
 Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor Cyan
 choco install $manifest -y
 Update-Path
