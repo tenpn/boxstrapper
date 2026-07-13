@@ -18,6 +18,7 @@ throttle-concurrents
 timestamper
 text-finder
 slack
+gitea
 
 # pipeline
 workflow-aggregator
