@@ -78,6 +78,57 @@ function Resolve-JavaHome {
     return $null
 }
 
+function Show-ManifestDrift {
+    # Generic version-drift check across the choco manifest: for every pin in packages.config,
+    # compare it to what's actually installed and warn (never act) on a mismatch. 
+    # This exists because `choco install packages.config` SKIPS an already-installed package 
+    # -- so bumping a pin and re-running silently leaves the OLD version in place. We surface
+    # that instead of hiding it, and print the exact `choco upgrade` to run. 
+    param([Parameter(Mandatory)][string]$Manifest)
+
+    try {
+        [xml]$pkgXml = Get-Content -Raw -LiteralPath $Manifest
+
+        # Installed id -> version, queried once. `choco list` is local-only by default on choco 2.x but
+        # needs --local-only on 1.x (where a bare `list` searches remote sources); detect and branch.
+        # --limit-output gives clean `id|version` lines (no header/footer/progress).
+        $listArgs = @('list', '--limit-output')
+        try {
+            $cv = (& choco --version 2>$null | Select-Object -First 1)
+            if ($cv -match '^\s*(\d+)' -and [int]$Matches[1] -lt 2) { $listArgs += '--local-only' }
+        } catch { }
+
+        $installed = @{}
+        foreach ($line in (& choco @listArgs)) {
+            $parts = @($line -split '\|')
+            if ($parts.Count -ge 2 -and $parts[0]) { $installed[$parts[0].ToLowerInvariant()] = $parts[1] }
+        }
+
+        $drift = @()
+        foreach ($pkg in $pkgXml.packages.package) {
+            $id  = [string]$pkg.id
+            $pin = [string]$pkg.version
+            if (-not $id -or -not $pin) { continue }                 # unpinned line: nothing to compare
+            $have = $installed[$id.ToLowerInvariant()]
+            if (-not $have) { continue }                             # not installed yet: the install step handles it
+            if ($have -ne $pin) {                                    # -ne is case-insensitive for strings
+                $drift += [pscustomobject]@{ Id = $id; Installed = $have; Pinned = $pin }
+            }
+        }
+
+        if ($drift.Count -gt 0) {
+            Write-Warning "[boxstrapper] Version drift: $($drift.Count) package(s) are pinned in packages.config but a DIFFERENT version is installed."
+            Write-Warning "[boxstrapper] Re-running does NOT fix this ('choco install' skips already-installed packages). Upgrade explicitly:"
+            foreach ($d in $drift) {
+                Write-Host ("    {0}: {1} installed, {2} pinned  ->  choco upgrade {0} --version {2} -y" -f $d.Id, $d.Installed, $d.Pinned) -ForegroundColor Yellow
+            }
+            Write-Host "    (stop the package's service first if it runs as one -- e.g. Stop-Service gitea -- then re-run Update-Box.ps1 to reconcile.)" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Warning "[boxstrapper] Manifest drift check skipped: $($_.Exception.Message)"
+    }
+}
+
 function Read-Secrets {
     # Parse the INI secrets file into a hashtable. Value = everything after the first '='
     # (so base64 tokens ending in '==' survive); '#' comments and blank lines are ignored.
@@ -148,6 +199,8 @@ choco install sysinternals --version 2026.6.17 -y --ignore-checksums
 Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor Cyan
 choco install $manifest -y
 Update-Path
+
+Show-ManifestDrift -Manifest $manifest
 
 # --- 1b. resolve the restore policy to a concrete snapshot id per service ---------------------------
 # Runs AFTER the manifest (restic is now installed) and BEFORE the services, so each service script is
