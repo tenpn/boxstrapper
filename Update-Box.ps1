@@ -6,13 +6,39 @@
     Safe to re-run any time. Installs everything in packages.config (skipping
     what is already present), then installs the VS Code extensions listed in
     vs-extensions.txt. Add further idempotent setup steps as a new numbered section below.
+
+    Restore control (Gitea + Jenkins offsite backups):
+      -Restore None            Set up restic + the backup task but do NOT restore (the default).
+      -Restore Latest          Restore the most recent snapshot if present; else behave like None.
+      -Restore Before -BeforeDate 2026-07-15
+                               Restore the most recent snapshot strictly before that date (local
+                               midnight for a bare yyyy-MM-dd). If a service has snapshots but none
+                               before the date, stops with a clear error and the box stays re-runnable.
+      -Restore ShowSnapshots   Print the available snapshot dates per service, then stop.
+    -BeforeDate is valid only with -Restore Before. bootstrap.ps1 prompts for these interactively.
+.EXAMPLE
+    .\Update-Box.ps1 -Restore Latest
+.EXAMPLE
+    .\Update-Box.ps1 -Restore Before -BeforeDate 2026-07-15
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Restore policy for the offsite backups. Resolved to a concrete snapshot id here (once, before the
+    # service scripts run) and handed to each as -RestoreSnapshotId. See [[gitea-restore-from-snapshot]].
+    [ValidateSet('None','Latest','ShowSnapshots','Before')]
+    [string]$Restore = 'None',
+    # Only meaningful with -Restore Before: ISO date (yyyy-MM-dd) whose most-recent-prior snapshot to
+    # restore. A string (not [datetime]) so bootstrap.ps1 can forward it through an `irm | iex` pipe.
+    [string]$BeforeDate = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Shared restic/secrets helpers (Resolve-RestoreRequest, Get-ResticSnapshots, Set-ResticEnv, ...). Its
+# Read-Secrets is identical to the one defined below -- dot-sourcing simply redefines it, harmlessly.
+. (Join-Path $PSScriptRoot 'Backup-Common.ps1')
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -67,6 +93,14 @@ function Read-Secrets {
     return $secrets
 }
 
+function Format-SnapDate {
+    # Display a Get-ResticSnapshots row's instant as local 'yyyy-MM-dd HH:mm', falling back to the raw
+    # RFC3339 string if the time didn't parse. Used only by the restore-resolution block below.
+    param($Snap)
+    if ($Snap.Time) { return $Snap.Time.ToLocalTime().ToString('yyyy-MM-dd HH:mm') }
+    return $Snap.TimeRaw
+}
+
 if (-not (Test-Admin)) {
     throw 'Update-Box.ps1 must run in an elevated PowerShell (Chocolatey needs admin).'
 }
@@ -115,6 +149,100 @@ Write-Host "[boxstrapper] Applying choco manifest: $manifest" -ForegroundColor C
 choco install $manifest -y
 Update-Path
 
+# --- 1b. resolve the restore policy to a concrete snapshot id per service ---------------------------
+# Runs AFTER the manifest (restic is now installed) and BEFORE the services, so each service script is
+# handed the exact snapshot to restore via -RestoreSnapshotId: '' = don't restore (still set up backups),
+# 'latest' = the most recent, or a full snapshot id (Before). ShowSnapshots prints and stops here; a bad
+# -Restore/-BeforeDate or an unsatisfiable Before also stops here -- after the idempotent manifest, so the
+# box is cleanly re-runnable with a corrected flag. All of this is a no-op for the default -Restore None.
+$req         = Resolve-RestoreRequest -Restore $Restore -BeforeDate $BeforeDate   # throws on a bad request
+$restoreMode = $req.Mode
+$boundary    = $req.Boundary
+$giteaSnapId   = ''
+$jenkinsSnapId = ''
+
+if ($restoreMode -eq 'Latest') {
+    # The workers already resolve 'latest' (and no-op on an empty repo) -- no interrogation needed here.
+    $giteaSnapId   = 'latest'
+    $jenkinsSnapId = 'latest'
+} elseif ($restoreMode -eq 'ShowSnapshots' -or $restoreMode -eq 'Before') {
+    $services    = @([pscustomobject]@{ Name = 'Gitea'; Tag = 'gitea' },
+                     [pscustomobject]@{ Name = 'Jenkins'; Tag = 'jenkins' })
+    $resolvedIds = @{ gitea = ''; jenkins = '' }
+    $haveR2      = -not [string]::IsNullOrEmpty($secrets['R2_ACCOUNT_ID'])
+    $resticCmd   = Get-Command restic -ErrorAction SilentlyContinue
+    if (-not $haveR2 -or -not $resticCmd) {
+        if (-not $haveR2) { $why = 'offsite backup is not configured (no R2_ACCOUNT_ID in secrets.ini)' }
+        else              { $why = 'restic is not on PATH' }
+        if ($restoreMode -eq 'ShowSnapshots') {
+            Write-Host "[boxstrapper] Cannot show snapshots: $why." -ForegroundColor DarkGray
+            Write-Host "[boxstrapper] Restore options: -Restore None | Latest | ShowSnapshots | (Before -BeforeDate yyyy-MM-dd)." -ForegroundColor DarkGray
+            return
+        }
+        Write-Warning "Cannot resolve -Restore Before: $why; continuing as -Restore None (nothing restored)."
+    } else {
+        $restic = $resticCmd.Source
+        try {
+            Set-ResticEnv -R2AccountId   $secrets['R2_ACCOUNT_ID'] -R2Bucket      $secrets['R2_BUCKET'] `
+                          -R2AccessKeyId $secrets['R2_ACCESS_KEY_ID'] -R2SecretKey $secrets['R2_SECRET_ACCESS_KEY'] `
+                          -ResticPassword $secrets['RESTIC_PASSWORD']
+            if ($restoreMode -eq 'ShowSnapshots') {
+                foreach ($svc in $services) {
+                    Write-Host ''
+                    Write-Host "[boxstrapper] $($svc.Name) snapshots (tag $($svc.Tag)):" -ForegroundColor Cyan
+                    $snaps = Get-ResticSnapshots -ResticExe $restic -Tag $svc.Tag
+                    if ($null -eq $snaps) {
+                        Write-Host '  (restic repo unreachable / not initialised yet)' -ForegroundColor DarkGray
+                    } elseif ($snaps.Count -eq 0) {
+                        Write-Host '  (no snapshots)' -ForegroundColor DarkGray
+                    } else {
+                        $sorted = @($snaps | Sort-Object Time)
+                        foreach ($s in $sorted) { Write-Host ('  {0}  {1}' -f (Format-SnapDate $s), $s.ShortId) }
+                        Write-Host ('  {0} snapshot(s), {1} .. {2}' -f $sorted.Count, (Format-SnapDate $sorted[0]), (Format-SnapDate $sorted[-1])) -ForegroundColor DarkGray
+                    }
+                }
+                Write-Host ''
+                Write-Host '[boxstrapper] To continue, re-run Update-Box.ps1 with one of:' -ForegroundColor Cyan
+                Write-Host '  -Restore Latest                          (restore the most recent snapshot)' -ForegroundColor DarkGray
+                Write-Host '  -Restore Before -BeforeDate yyyy-MM-dd    (restore the most recent snapshot before a date)' -ForegroundColor DarkGray
+                Write-Host '  -Restore None                            (set up backups without restoring)' -ForegroundColor DarkGray
+                return
+            } else {
+                # Before: resolve each tag's most-recent snapshot strictly before the boundary, or collect a
+                # clear per-service error. A tag with NO snapshots is a clean skip (nothing to restore); a
+                # tag WITH snapshots but none before the date is an error (a bad date, not an empty repo).
+                $errors = @()
+                foreach ($svc in $services) {
+                    $snaps = Get-ResticSnapshots -ResticExe $restic -Tag $svc.Tag
+                    if ($null -eq $snaps -or $snaps.Count -eq 0) {
+                        Write-Host "[boxstrapper] No $($svc.Name) snapshots in the repo; nothing to restore for $($svc.Name)." -ForegroundColor DarkGray
+                        continue
+                    }
+                    $before = @($snaps | Where-Object { $_.Time -and $_.Time -lt $boundary })
+                    if ($before.Count -eq 0) {
+                        $sorted = @($snaps | Sort-Object Time)
+                        $errors += "$($svc.Name): no snapshot before $BeforeDate (has $($sorted.Count): $(Format-SnapDate $sorted[0]) .. $(Format-SnapDate $sorted[-1]))."
+                    } else {
+                        $pick = @($before | Sort-Object Time)[-1]
+                        $resolvedIds[$svc.Tag] = $pick.Id
+                        Write-Host "[boxstrapper] $($svc.Name): will restore snapshot $($pick.ShortId) ($(Format-SnapDate $pick))." -ForegroundColor Green
+                    }
+                }
+                if ($errors.Count -gt 0) {
+                    Write-Host "[boxstrapper] Cannot honour -Restore Before -BeforeDate $BeforeDate :" -ForegroundColor Red
+                    foreach ($e in $errors) { Write-Host "  $e" -ForegroundColor Red }
+                    Write-Warning 'Re-run Update-Box.ps1 with a corrected -BeforeDate, or -Restore Latest / -Restore None. Nothing was changed.'
+                    return
+                }
+                $giteaSnapId   = $resolvedIds['gitea']
+                $jenkinsSnapId = $resolvedIds['jenkins']
+            }
+        } finally {
+            Clear-ResticEnv
+        }
+    }
+}
+
 # --- 2. VS Code extensions -------------------------------------------------
 $extFile = Join-Path $PSScriptRoot 'vs-extensions.txt'
 if (Get-Command 'code' -ErrorAction SilentlyContinue) {
@@ -152,7 +280,8 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2SecretKey      $secrets['R2_SECRET_ACCESS_KEY'] `
     -ResticPassword   $secrets['RESTIC_PASSWORD'] `
     -HeartbeatPingUrl $secrets['HC_GITEA_PING_URL'] `
-    -SecretsFile      $secretsFile
+    -SecretsFile      $secretsFile `
+    -RestoreSnapshotId $giteaSnapId
 
 # --- 5. Jenkins service (choco installs its OWN auto-start WinSW service; Jenkins-Setup.ps1 rebinds ---
 #        it loopback-only at 127.0.0.1:8080, serves it under /jenkins, pre-installs jenkins\plugins.txt,
@@ -172,7 +301,8 @@ if (Get-Command 'code' -ErrorAction SilentlyContinue) {
     -R2Bucket               $secrets['R2_BUCKET'] `
     -R2AccessKeyId          $secrets['R2_ACCESS_KEY_ID'] `
     -R2SecretKey            $secrets['R2_SECRET_ACCESS_KEY'] `
-    -ResticPassword         $secrets['RESTIC_PASSWORD']
+    -ResticPassword         $secrets['RESTIC_PASSWORD'] `
+    -RestoreSnapshotId      $jenkinsSnapId
 
 # --- 6. Autologon for the admin desktop session (skips if no password) ------
 & (Join-Path $PSScriptRoot 'Autologon-Setup.ps1') -Password $secrets['AUTOLOGON_PASSWORD']

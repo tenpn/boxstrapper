@@ -36,10 +36,14 @@
          still provisions.
       5. OFFSITE BACKUP/RESTORE -- when R2/restic creds are supplied, this script also OWNS Jenkins'
          offsite backup lifecycle (the self-contained-element convention, like the heartbeat below):
-         before first start it auto-restores the latest snapshot onto a fresh box (Restore-Jenkins.ps1),
-         and it registers the weekly restic->R2 backup task (via the shared Register-ResticBackup.ps1). Both skip when the
-         creds are blank. So commenting out Jenkins' one Update-Box.ps1 call drops the service, its
-         monitoring, AND its backup together -- they live and die with this script.
+         before first start it restores a snapshot onto a fresh box (Restore-Jenkins.ps1), and it
+         registers the weekly restic->R2 backup task (via the shared Register-ResticBackup.ps1). WHICH
+         snapshot is -RestoreSnapshotId, chosen by Update-Box.ps1 from its -Restore flag: '' = -Restore
+         None (skip restore -- and so skip the pre-restore Stop-Service, leaving a healthy Jenkins alone
+         -- but still register the backup), 'latest', or a specific id (-Restore Before). Backup setup
+         runs whenever the creds are present, restore only when the id is also non-blank. So commenting
+         out Jenkins' one Update-Box.ps1 call drops the service, its monitoring, its restore, AND its
+         backup together -- they live and die with this script.
 
       6. DEDICATED SERVICE ACCOUNT -- when -ServiceAccountPassword is supplied (secrets.ini's
          JENKINS_SERVICE_PASSWORD) we stop running Jenkins as LocalSystem. Jenkins runs arbitrary build
@@ -102,7 +106,12 @@ param(
     [string]$R2Bucket       = '',
     [string]$R2AccessKeyId  = '',
     [string]$R2SecretKey    = '',
-    [string]$ResticPassword = ''
+    [string]$ResticPassword = '',
+    # Which snapshot to restore before the first start, chosen by Update-Box.ps1 (it resolves -Restore
+    # None|Latest|Before to a concrete value once, up front): '' = don't restore (backups still set up),
+    # 'latest' = the most recent, or a full snapshot id. Forwarded to Restore-Jenkins.ps1 as -SnapshotId.
+    # Defaults to 'latest' so a direct/standalone call keeps the old auto-restore-latest behaviour.
+    [string]$RestoreSnapshotId = 'latest'
 )
 
 Set-StrictMode -Version Latest
@@ -353,8 +362,10 @@ Write-Host "[boxstrapper] JENKINS_HOME: $jenkinsHome" -ForegroundColor DarkGray
 # the apply block at the bottom starts Jenkins exactly once on the restored data (no start-then-bounce).
 # The worker no-ops when there's no snapshot or the box already has jobs / a restore marker, so a
 # re-bootstrap never clobbers live data. All best-effort: a restore hiccup just warns and the box comes
-# up empty / on the wizard. Guarded by a non-blank R2 account id (blank => backups unconfigured).
-if ($R2AccountId) {
+# up empty / on the wizard. Guarded by a non-blank R2 account id (blank => backups unconfigured) AND a
+# non-blank -RestoreSnapshotId (blank => -Restore None: skip restore -- and so skip the Stop-Service too,
+# leaving a healthy Jenkins running -- but still register the backup task below).
+if ($R2AccountId -and $RestoreSnapshotId) {
     try {
         $jsvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($jsvc -and $jsvc.Status -eq 'Running') {
@@ -365,7 +376,8 @@ if ($R2AccountId) {
         & (Join-Path $PSScriptRoot 'Restore-Jenkins.ps1') `
             -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
             -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword `
-            -ServiceName $ServiceName -JenkinsHome $jenkinsHome
+            -ServiceName $ServiceName -JenkinsHome $jenkinsHome `
+            -SnapshotId $RestoreSnapshotId
     } catch {
         Write-Host "[boxstrapper] Auto-restore skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
     } finally {

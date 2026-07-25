@@ -11,7 +11,26 @@
     it off and reboot), then installs Chocolatey + git (skipping whatever is already
     present), clones the boxstrapper repo, and hands off to Update-Box.ps1 which
     applies the choco manifest and the rest. Safe to re-run.
+
+    Restore control: pass -Restore None|Latest|Before|ShowSnapshots (with -BeforeDate for Before) to
+    choose what to do with the Gitea/Jenkins offsite backups. When neither is passed -- the usual
+    `irm | iex` case, which can't carry flags -- this prompts for the choice interactively and forwards
+    it to Update-Box.ps1. The default is None (set up backups without restoring).
+.PARAMETER Restore
+    None (default) | Latest | Before | ShowSnapshots. Blank => prompt interactively. Forwarded to
+    Update-Box.ps1, which validates it authoritatively.
+.PARAMETER BeforeDate
+    ISO date (yyyy-MM-dd) for -Restore Before; ignored otherwise.
 #>
+
+param(
+    # No [ValidateSet] here on purpose: under `irm | iex` the whole script text is Invoke-Expression'd,
+    # and a ValidateSet whose default ('' = not passed) isn't a member throws at parse time before the
+    # body runs. Update-Box.ps1 (run as a file, not iex'd) keeps the ValidateSet and validates the value
+    # we forward. '' = not passed -> prompt.
+    [string]$Restore    = '',
+    [string]$BeforeDate = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -59,6 +78,36 @@ function Update-Path {
     }
 }
 
+function Read-RestoreChoice {
+    # Interactive restore-policy menu for the piped `irm | iex` bootstrap (which can't take a -Restore
+    # flag). Returns a splat hashtable for Update-Box.ps1. Enter = None, the safe default. The date is
+    # validated the same way Update-Box's Resolve-RestoreRequest does (InvariantCulture, AssumeLocal).
+    Write-Host ''
+    Write-Host '[boxstrapper] Restore from an offsite backup? (Gitea + Jenkins)' -ForegroundColor Cyan
+    Write-Host '  1) None            - set up backups but do NOT restore  [default]' -ForegroundColor DarkGray
+    Write-Host '  2) Latest          - restore the most recent snapshot' -ForegroundColor DarkGray
+    Write-Host '  3) Before a date   - restore the most recent snapshot before a date' -ForegroundColor DarkGray
+    Write-Host '  4) Show snapshots  - list available snapshots, then stop' -ForegroundColor DarkGray
+    while ($true) {
+        $sel = (Read-Host 'Choice [1-4, Enter=1]').Trim()
+        if (-not $sel -or $sel -eq '1') { return @{ Restore = 'None' } }
+        if ($sel -eq '2') { return @{ Restore = 'Latest' } }
+        if ($sel -eq '4') { return @{ Restore = 'ShowSnapshots' } }
+        if ($sel -eq '3') {
+            while ($true) {
+                $d = (Read-Host 'Restore the most recent snapshot before which date? (yyyy-MM-dd)').Trim()
+                $dt = [datetime]::MinValue
+                if ([datetime]::TryParse($d, [cultureinfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)) {
+                    return @{ Restore = 'Before'; BeforeDate = $d }
+                }
+                Write-Warning "Could not parse '$d'. Use an ISO date like 2026-07-15."
+            }
+        }
+        Write-Warning 'Enter 1, 2, 3, or 4.'
+    }
+}
+
 if (-not (Test-Admin)) {
     throw 'boxstrapper must run in an elevated PowerShell. Start PowerShell with "Run as administrator", then re-run the one-liner.'
 }
@@ -87,6 +136,17 @@ if ($sac -eq 1) {
 }
 if ($sac -eq 2) {
     Write-Warning 'Smart App Control is in EVALUATION mode: git works for now, but Windows can promote it to Enforced at any time and break a later run. Consider turning SAC off via Windows Security > App & browser control > Smart App Control.'
+}
+
+# --- restore policy --------------------------------------------------------
+# Decide it up front (before the long installs) so the user can answer and walk away. An explicit
+# -Restore skips the prompt; otherwise prompt (this is the piped `irm | iex` path, which can't pass
+# flags). $restoreChoice is a splat hashtable forwarded to Update-Box.ps1, which validates it.
+if ($Restore) {
+    $restoreChoice = @{ Restore = $Restore }
+    if ($BeforeDate) { $restoreChoice.BeforeDate = $BeforeDate }
+} else {
+    $restoreChoice = Read-RestoreChoice
 }
 
 # --- Chocolatey ------------------------------------------------------------
@@ -139,5 +199,5 @@ if (Test-Path (Join-Path $Dir '.git')) {
 
 # --- hand off to the idempotent setup script -------------------------------
 $setup = Join-Path $Dir 'Update-Box.ps1'
-Write-Host "[boxstrapper] Running $setup ..." -ForegroundColor Cyan
-& $setup
+Write-Host "[boxstrapper] Running $setup (-Restore $($restoreChoice.Restore)) ..." -ForegroundColor Cyan
+& $setup @restoreChoice

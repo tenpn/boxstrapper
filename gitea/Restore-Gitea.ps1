@@ -112,7 +112,9 @@ if ($r.Code -ne 0) {
     return
 }
 $snaps = @()
-try { $snaps = @($r.Output | ConvertFrom-Json) } catch { $snaps = @() }
+# Where-Object drops the scalar an empty '[]' becomes under 5.1 (whose .Count is 1), so an empty tag is
+# a true 0-length array and takes the clean "nothing to restore" path instead of erroring on restore.
+try { $snaps = @($r.Output | ConvertFrom-Json | Where-Object { $_ }) } catch { $snaps = @() }
 if ($snaps.Count -eq 0) {
     Write-Host "[boxstrapper] No '$Tag'-tagged snapshots in the restic repo; nothing to restore." -ForegroundColor DarkGray
     return

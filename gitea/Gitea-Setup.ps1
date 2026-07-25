@@ -22,12 +22,14 @@
     root while ROOT_URL makes it emit /git-prefixed links). Off the tailnet (sandbox / no auth key) all
     of that is skipped and Gitea just stays loopback-only.
 
-    RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them from secrets.ini), this
-    configures the service but does NOT start it, calls the internal Restore-Gitea.ps1 worker while it's
-    stopped, then starts the service exactly once. So a rebuilt box that has an offsite backup comes up
-    directly on the restored data instead of being started empty by setup and then bounced by a separate
-    restore. A no-op unless the box has no data yet AND a snapshot exists; an unconfigured/sandbox box
-    just starts to the web installer as before.
+    RESTORE: if the R2/restic creds are given (Update-Box.ps1 passes them from secrets.ini) AND
+    -RestoreSnapshotId is non-blank, this configures the service but does NOT start it, calls the
+    internal Restore-Gitea.ps1 worker (with that snapshot) while it's stopped, then starts the service
+    exactly once. So a rebuilt box that has an offsite backup comes up directly on the restored data
+    instead of being started empty by setup and then bounced by a separate restore. -RestoreSnapshotId
+    is chosen by Update-Box.ps1 from its -Restore flag: '' = -Restore None (skip restore, backups still
+    set up below), 'latest', or a specific snapshot id (-Restore Before). A no-op unless the box has no
+    data yet AND that snapshot exists; an unconfigured/sandbox box just starts to the web installer.
 
     BACKUP: this script also OWNS Gitea's offsite backup (the self-contained-element convention, like the
     heartbeat): when the R2/restic creds are supplied it registers the daily gitea-dump->restic->R2 task
@@ -58,6 +60,11 @@ param(
     [string]$R2AccessKeyId  = '',
     [string]$R2SecretKey    = '',
     [string]$ResticPassword = '',
+    # Which snapshot to restore before the first start, chosen by Update-Box.ps1 (it resolves -Restore
+    # None|Latest|Before to a concrete value once, up front): '' = don't restore (backups still set up),
+    # 'latest' = the most recent, or a full snapshot id. Forwarded to Restore-Gitea.ps1 as -SnapshotId.
+    # Defaults to 'latest' so a direct/standalone call keeps the old auto-restore-latest behaviour.
+    [string]$RestoreSnapshotId = 'latest',
     # Healthchecks.io ping URL for THIS service's heartbeat (Update-Box.ps1 passes HC_GITEA_PING_URL
     # from secrets.ini). Blank => no heartbeat (non-fatal). Owned here so disabling Gitea -- commenting
     # its one Update-Box call -- also drops its monitoring (the self-contained-element convention).
@@ -253,12 +260,14 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 # onto disk here and then started once (below) on the recovered data -- no start-then-bounce churn.
 # The worker leaves the service alone (we own the start). Best-effort: a restore hiccup must never wedge
 # provisioning, so we note it and carry on to a normal start (the box then shows the web installer).
-# A no-op without R2 creds, on a box that already has data, or when there's no snapshot to restore.
-if ($R2AccountId) {
+# A no-op without R2 creds, when -RestoreSnapshotId is '' (-Restore None), on a box that already has
+# data, or when there's no snapshot to restore. (Backups are still set up below regardless of restore.)
+if ($R2AccountId -and $RestoreSnapshotId) {
     try {
         & (Join-Path $PSScriptRoot 'Restore-Gitea.ps1') `
             -R2AccountId $R2AccountId -R2Bucket $R2Bucket -R2AccessKeyId $R2AccessKeyId `
-            -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword -WorkDir $WorkDir
+            -R2SecretKey $R2SecretKey -ResticPassword $ResticPassword -WorkDir $WorkDir `
+            -SnapshotId $RestoreSnapshotId
     } catch {
         Write-Host "[boxstrapper] Auto-restore skipped: $($_.Exception.Message)" -ForegroundColor DarkGray
     } finally {

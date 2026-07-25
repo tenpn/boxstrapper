@@ -112,3 +112,66 @@ function Send-BackupPing {
         Write-Warning "[boxstrapper] Healthchecks ping to $target failed: $($_.Exception.Message)"
     }
 }
+
+function Resolve-RestoreRequest {
+    # Validate the -Restore / -BeforeDate pair (as passed to bootstrap.ps1 / Update-Box.ps1) into a
+    # normalised mode plus, for 'Before', a [datetimeoffset] boundary. The ONE authority for the restore
+    # argument rules, so both entry points reject the same bad combinations with the same clear message.
+    # Throws (before the box is touched) on: an unknown keyword, -Restore Before with no date, a
+    # -BeforeDate given with any other keyword, or an unparseable date. See [[gitea-restore-from-snapshot]].
+    param([string]$Restore = 'None', [string]$BeforeDate = '')
+    $mode = $Restore
+    if (-not $mode) { $mode = 'None' }
+    # Case-insensitive normalise to the canonical keyword (ValidateSet already gates the entry-point
+    # params, but this stays correct even when called directly / from a test).
+    switch -Regex ($mode) {
+        '^(?i)none$'          { $mode = 'None' }
+        '^(?i)latest$'        { $mode = 'Latest' }
+        '^(?i)showsnapshots$' { $mode = 'ShowSnapshots' }
+        '^(?i)before$'        { $mode = 'Before' }
+        default { throw "Unknown -Restore '$Restore'. Use None | Latest | Before | ShowSnapshots." }
+    }
+    $boundary = $null
+    if ($mode -eq 'Before') {
+        if (-not $BeforeDate) { throw "-Restore Before requires -BeforeDate <yyyy-MM-dd>." }
+        # InvariantCulture so 'yyyy-MM-dd' is unambiguous on non-US boxes; AssumeLocal so a bare date
+        # means local midnight (the strictly-before boundary). A full 'yyyy-MM-dd HH:mm' is accepted too.
+        $dt = [datetime]::MinValue
+        if (-not [datetime]::TryParse($BeforeDate, [cultureinfo]::InvariantCulture,
+                 [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)) {
+            throw "Could not parse -BeforeDate '$BeforeDate'. Use an ISO date like 2026-07-15."
+        }
+        $boundary = [datetimeoffset]::new($dt)
+    } elseif ($BeforeDate) {
+        throw "-BeforeDate only applies to -Restore Before (got -Restore $mode)."
+    }
+    return [pscustomobject]@{ Mode = $mode; Boundary = $boundary }
+}
+
+function Get-ResticSnapshots {
+    # List one tag's snapshots in the shared repo as easy-to-select objects. Assumes Set-ResticEnv has run.
+    # Returns $null when the repo is UNREACHABLE / not initialised (restic exit != 0) -- distinct from @()
+    # for a reachable-but-empty tag; callers must tell these apart (use `if ($null -eq $snaps)`, never
+    # `$snaps -eq $null`). The full .Id is carried downstream (not the 8-hex short id) to avoid any
+    # ambiguity in the repo Gitea and Jenkins share. StrictMode-safe: only touches id/short_id/time.
+    param([Parameter(Mandatory)][string]$ResticExe, [Parameter(Mandatory)][string]$Tag)
+    # -q keeps any restic progress chatter out of the JSON that Invoke-Native merges via 2>&1.
+    $r = Invoke-Native $ResticExe @('snapshots', '--tag', $Tag, '--json', '-q')
+    if ($r.Code -ne 0) { return $null }
+    $raw = @()
+    # An empty result is '[]', which ConvertFrom-Json yields as a single scalar whose .Count is 1 under
+    # 5.1 -- the `| Where-Object { $_ }` filter drops it so an empty tag is a true 0-length array.
+    try { $raw = @($r.Output | ConvertFrom-Json | Where-Object { $_ }) } catch { $raw = @() }
+    $out = @()
+    foreach ($s in $raw) {
+        $t = $null
+        # restic 'time' is RFC3339 with an offset and stays a String under 5.1; parse to an absolute
+        # instant so comparisons are timezone-correct. RoundtripKind tolerates the fractional seconds.
+        try {
+            $t = [datetimeoffset]::Parse([string]$s.time, [cultureinfo]::InvariantCulture,
+                 [System.Globalization.DateTimeStyles]::RoundtripKind)
+        } catch { $t = $null }
+        $out += [pscustomobject]@{ Id = [string]$s.id; ShortId = [string]$s.short_id; Time = $t; TimeRaw = [string]$s.time }
+    }
+    return ,$out    # unary comma preserves array shape for a single-element result
+}
