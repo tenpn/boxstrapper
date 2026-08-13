@@ -18,7 +18,6 @@ throttle-concurrents
 timestamper
 text-finder
 slack
-gitea
 generic-webhook-trigger
 
 # pipeline
