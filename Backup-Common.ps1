@@ -11,6 +11,8 @@
     Each dot-sources this file: from a root script via `. (Join-Path $PSScriptRoot 'Backup-Common.ps1')`,
     from a gitea\ / jenkins\ script via `. (Join-Path $PSScriptRoot '..\Backup-Common.ps1')`.
 
+    It also holds Suspend-HeartbeatTask / Resume-HeartbeatTask, so backups don't trigger false-positive health check failures.
+
     This file ONLY defines functions (no top-level side effects), so dot-sourcing is safe; callers own
     their own Set-StrictMode / $ErrorActionPreference. The service-SPECIFIC bits deliberately stay in each
     service's own script: gitea dump+zip vs the JENKINS_HOME tree, the SQLite/RUN_USER restore vs the
@@ -110,6 +112,70 @@ function Send-BackupPing {
         Write-Host "[boxstrapper] Backup status pinged: $target"
     } catch {
         Write-Warning "[boxstrapper] Healthchecks ping to $target failed: $($_.Exception.Message)"
+    }
+}
+
+function Suspend-HeartbeatTask {
+    # Disable a service's Healthchecks heartbeat task (Healthchecks-Setup.ps1's 'boxstrapper-heartbeat*')
+    # for the window in which a backup worker has that service STOPPED, so a planned stop isn't reported
+    # as an outage
+    # Returns $true only if the task existed, was enabled, and is now disabled (the caller must then 
+    # Resume-HeartbeatTask in its finally). 
+    # Best-effort: a missing task (heartbeat not configured) or a scheduler hiccup just returns $false 
+    # -- monitoring must never affect the backup itself.
+    param([Parameter(Mandatory)][string]$TaskName)
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-Host "[boxstrapper] No heartbeat task '$TaskName'; nothing to suspend." -ForegroundColor DarkGray
+            return $false
+        }
+        if ($task.State -eq 'Disabled') { return $false }   # not ours to re-enable
+        Disable-ScheduledTask -TaskName $TaskName | Out-Null
+        Write-Host "[boxstrapper] Suspended heartbeat task '$TaskName' for the backup window." -ForegroundColor DarkGray
+        return $true
+    } catch {
+        Write-Warning "[boxstrapper] Could not suspend heartbeat task '$TaskName': $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Resume-HeartbeatTask {
+    # Undo Suspend-HeartbeatTask once the service is back: wait for the service to actually answer,
+    # re-enable the task, then fire it once so a fresh SUCCESS ping goes out right away.
+    #   1. wait for HTTP 200 on the task's own -HealthUrl so we know it's up.
+    #   2. Enable-ScheduledTask -- if the scheduler decides a run was missed while disabled
+    #      (StartWhenAvailable), it fires now against a service that is already ready;
+    #   3. Start-ScheduledTask -- make double-sure we don't leave a gap.
+    # Best-effort throughout: a timeout just re-enables anyway (the next scheduled probe reports the truth).
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [int]$ReadyWaitSec = 180
+    )
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task) { return }
+        $healthUrl = ''
+        $args = [string]$task.Actions[0].Arguments
+        if ($args -match '-HealthUrl\s+"([^"]+)"') { $healthUrl = $matches[1] }
+        if ($healthUrl) {
+            $deadline = (Get-Date).AddSeconds($ReadyWaitSec)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $resp = Invoke-WebRequest $healthUrl -UseBasicParsing -TimeoutSec 5
+                    if ($resp.StatusCode -eq 200) { $ready = $true; break }
+                } catch { }
+                Start-Sleep -Seconds 3
+            }
+            if ($ready) { Write-Host "[boxstrapper] $healthUrl is answering again." -ForegroundColor DarkGray }
+            else        { Write-Warning "[boxstrapper] $healthUrl not answering after ${ReadyWaitSec}s; re-enabling the heartbeat anyway." }
+        }
+        Enable-ScheduledTask -TaskName $TaskName | Out-Null
+        Start-ScheduledTask  -TaskName $TaskName
+        Write-Host "[boxstrapper] Resumed heartbeat task '$TaskName' and sent a fresh ping." -ForegroundColor DarkGray
+    } catch {
+        Write-Warning "[boxstrapper] Could not resume heartbeat task '$TaskName': $($_.Exception.Message) -- re-enable it by hand (Enable-ScheduledTask)."
     }
 }
 

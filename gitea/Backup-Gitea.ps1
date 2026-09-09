@@ -29,8 +29,12 @@
     data\queues\common\LOCK (the LevelDB queue lock); Windows then refuses to let the dump read it and
     the dump aborts. So the service is stopped for the dump and restarted in a finally -- it always
     comes back up even when the dump throws, so the box is never left with Gitea down. Downtime is just
-    the dump (~15-20s) once a day. Because this stops a service, MANUAL runs need an ELEVATED shell;
-    the scheduled task already runs as SYSTEM, so the nightly run is unaffected.
+    the dump once a day -- but the dump zips the WHOLE data dir (repos + LFS), so that window scales
+    with the data: seconds on a fresh box, 5-6 MINUTES at ~24 GB (measured 2026-09), and growing.
+    Because this stops a service, MANUAL runs need an ELEVATED shell; the scheduled task already runs
+    as SYSTEM, so the nightly run is unaffected.
+
+    HEARTBEAT -- suspend heartbeats for the backup period, so it doesn't send a fail while we're down for backup.
 
     SECRETS -- why this worker reads secrets.ini directly:
     The R2 secret key and RESTIC_PASSWORD are NOT baked into the scheduled-task argument, because that
@@ -77,6 +81,9 @@ param(
     # restic tag scoping both backup and forget to Gitea snapshots in the shared (Jenkins) repo (see
     # RETENTION in the header). Mirrors Backup-Jenkins.ps1's -Tag 'jenkins'.
     [string]$Tag         = 'gitea',
+    # Gitea's Healthchecks heartbeat task (Healthchecks-Setup.ps1's default name), suspended while the
+    # service is stopped for the dump so the planned stop isn't reported as an outage (see HEARTBEAT).
+    [string]$HeartbeatTaskName = 'boxstrapper-heartbeat',
     [int]   $KeepDaily   = 7,
     [int]   $KeepWeekly  = 4,
     [int]   $KeepMonthly = 6,
@@ -157,8 +164,12 @@ try {
     $env:GITEA_WORK_DIR = $WorkDir
 
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    $stoppedService = $false
+    $stoppedService     = $false
+    $heartbeatSuspended = $false
     if ($svc -and $svc.Status -eq 'Running') {
+        # Park the heartbeat FIRST so its hourly probe can't land inside the stopped window and /fail
+        # (the dump takes minutes on a large data set -- see HEARTBEAT in the header). Resumed in the finally.
+        $heartbeatSuspended = Suspend-HeartbeatTask -TaskName $HeartbeatTaskName
         Write-Host "[boxstrapper] Stopping '$ServiceName' for a consistent dump..." -ForegroundColor Cyan
         Stop-Service -Name $ServiceName
         Start-Sleep -Seconds 2            # let NSSM fully release the data\queues LevelDB LOCK
@@ -180,6 +191,9 @@ try {
             try { Start-Service -Name $ServiceName }
             catch { Write-Warning "[boxstrapper] Failed to restart '$ServiceName': $($_.Exception.Message)" }
         }
+        # Always un-park the heartbeat (waits for /api/healthz, re-enables, sends a fresh success ping).
+        # If the restart above failed, that probe /fails -- which is then a REAL outage report.
+        if ($heartbeatSuspended) { Resume-HeartbeatTask -TaskName $HeartbeatTaskName }
     }
 
     # --- 2. restic backup (client-side encrypted, uploaded to R2, tagged) ---

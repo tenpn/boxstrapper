@@ -45,6 +45,8 @@
       HC_JENKINS_BACKUP_PING_URL (optional -- a SEPARATE Healthchecks check from the Jenkins heartbeat)
     Blank R2/restic creds => pings /fail (if a URL is set) and exits; never throws.
 
+    HEARTBEAT -- suspend heartbeats for the backup period, so it doesn't send a fail while we're down for backup.
+
     Because this stops a service, MANUAL runs need an ELEVATED shell; the scheduled task already runs as
     SYSTEM, so the weekly run is unaffected. A backup must never wedge the box, so every stage is wrapped
     and any failure is reported to Healthchecks rather than thrown. Stays Windows PowerShell 5.1-safe
@@ -75,6 +77,9 @@ param(
     [string]$JenkinsHome = '',
     # restic tag scoping both backup and forget to Jenkins snapshots in the shared (Gitea) repo.
     [string]$Tag         = 'jenkins',
+    # Jenkins' Healthchecks heartbeat task (the name Jenkins-Setup.ps1 registers), suspended while the
+    # service is stopped for the snapshot so the planned stop isn't reported as an outage (see HEARTBEAT).
+    [string]$HeartbeatTaskName = 'boxstrapper-heartbeat-jenkins',
     # Weekly cadence => GFS in weeks/months; no --keep-daily (a weekly job has ~1 snapshot per day-used).
     [int]   $KeepWeekly  = 6,
     [int]   $KeepMonthly = 6,
@@ -171,8 +176,12 @@ try {
     # outer catch (and pings /fail), but the box never ends with Jenkins down. forget/prune below run
     # with Jenkins already back up (they only touch the remote repo).
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    $stoppedService = $false
+    $stoppedService     = $false
+    $heartbeatSuspended = $false
     if ($svc -and $svc.Status -eq 'Running') {
+        # Park the heartbeat FIRST so its hourly /jenkins/login probe can't land inside the stopped
+        # window and /fail (see HEARTBEAT in the header). Resumed in the finally.
+        $heartbeatSuspended = Suspend-HeartbeatTask -TaskName $HeartbeatTaskName
         Write-Host "[boxstrapper] Stopping '$ServiceName' for a consistent snapshot..." -ForegroundColor Cyan
         Stop-Service -Name $ServiceName -Force
         Start-Sleep -Seconds 2            # let WinSW fully release file handles
@@ -189,6 +198,10 @@ try {
             try { Start-Service -Name $ServiceName }
             catch { Write-Warning "[boxstrapper] Failed to restart '$ServiceName': $($_.Exception.Message)" }
         }
+        # Always un-park the heartbeat: waits for /jenkins/login to answer (Jetty takes a minute or more
+        # after Start-Service), re-enables the task, sends a fresh success ping. A failed restart still
+        # surfaces -- the resumed probe then /fails for real.
+        if ($heartbeatSuspended) { Resume-HeartbeatTask -TaskName $HeartbeatTaskName }
     }
 
     # --- retention (GFS), SCOPED to the 'jenkins' tag so Gitea snapshots are untouched ---
